@@ -32,7 +32,7 @@ public class SettlementService {
 	private final MerchantRepository merchantRepository;
 
 	@Transactional
-	public Settlement settleOne(LocalDate date, MerchantDailyAggregate aggregate) {
+	public Settlement settleOne(LocalDate date, MerchantAggregate aggregate) {
 		Optional<Settlement> existing = settlementRepository.findByMerchantIdAndSettlementDate(
 				aggregate.merchantId(), date);
 		if (existing.isPresent()) {

@@ -26,14 +26,14 @@ public class SettlementBatchRunner {
 		LocalDateTime from = date.atStartOfDay();
 		LocalDateTime to = date.plusDays(1).atStartOfDay();
 
-		List<MerchantDailyAggregate> aggregates = settlementQueryRepository.aggregate(from, to, merchantId);
+		List<MerchantAggregate> aggregates = settlementQueryRepository.aggregate(from, to, merchantId);
 
 		return aggregates.stream()
 				.map(aggregate -> settleWithFallback(date, aggregate))
 				.toList();
 	}
 
-	private Settlement settleWithFallback(LocalDate date, MerchantDailyAggregate aggregate) {
+	private Settlement settleWithFallback(LocalDate date, MerchantAggregate aggregate) {
 		try {
 			return settlementService.settleOne(date, aggregate);
 		} catch (DuplicateSettlementException e) {

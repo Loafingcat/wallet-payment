@@ -25,7 +25,7 @@ public class SettlementQueryRepository {
 
 	private final JPAQueryFactory queryFactory;
 
-	public List<MerchantDailyAggregate> aggregate(LocalDateTime from, LocalDateTime to, Long merchantId) {
+	public List<MerchantAggregate> aggregate(LocalDateTime from, LocalDateTime to, Long merchantId) {
 		QLedgerEntry entry = QLedgerEntry.ledgerEntry;
 
 		BooleanBuilder where = new BooleanBuilder();
@@ -36,7 +36,7 @@ public class SettlementQueryRepository {
 		}
 
 		return queryFactory
-				.select(Projections.constructor(MerchantDailyAggregate.class,
+				.select(Projections.constructor(MerchantAggregate.class,
 						entry.merchantId,
 						new CaseBuilder().when(entry.type.eq(LedgerType.PAYMENT)).then(entry.amount).otherwise(0L)
 								.sum(),
