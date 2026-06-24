@@ -21,6 +21,11 @@ public class GlobalExceptionHandler {
 		return ResponseEntity.status(HttpStatus.NOT_FOUND).body(new ErrorResponse(e.getMessage()));
 	}
 
+	@ExceptionHandler(MerchantNotFoundException.class)
+	public ResponseEntity<ErrorResponse> handleMerchantNotFound(MerchantNotFoundException e) {
+		return ResponseEntity.status(HttpStatus.NOT_FOUND).body(new ErrorResponse(e.getMessage()));
+	}
+
 	@ExceptionHandler(InsufficientBalanceException.class)
 	public ResponseEntity<ErrorResponse> handleInsufficientBalance(InsufficientBalanceException e) {
 		return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse(e.getMessage()));
