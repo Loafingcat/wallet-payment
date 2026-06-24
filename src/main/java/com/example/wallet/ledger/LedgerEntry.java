@@ -1,0 +1,62 @@
+package com.example.wallet.ledger;
+
+import java.time.LocalDateTime;
+
+import org.hibernate.annotations.CreationTimestamp;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+
+// 거래 원장은 불변이다. UPDATE/DELETE를 절대 하지 않는다 — 취소/환불은 반대 방향의 새 LedgerEntry로 표현한다.
+// 그래서 이 엔티티에는 setter가 없고, 생성 후 상태를 바꿀 수 있는 메서드도 없다.
+@Entity
+@Table(name = "ledger_entry")
+@Getter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+public class LedgerEntry {
+
+	@Id
+	@GeneratedValue(strategy = GenerationType.IDENTITY)
+	private Long id;
+
+	@Column(nullable = false)
+	private Long walletId;
+
+	@Enumerated(EnumType.STRING)
+	@Column(nullable = false, length = 20)
+	private LedgerType type;
+
+	@Column(nullable = false)
+	private Long amount;
+
+	@Column(nullable = false)
+	private Long balanceAfter;
+
+	@Column
+	private String idempotencyKey;
+
+	@CreationTimestamp
+	@Column(nullable = false, updatable = false)
+	private LocalDateTime createdAt;
+
+	private LedgerEntry(Long walletId, LedgerType type, Long amount, Long balanceAfter, String idempotencyKey) {
+		this.walletId = walletId;
+		this.type = type;
+		this.amount = amount;
+		this.balanceAfter = balanceAfter;
+		this.idempotencyKey = idempotencyKey;
+	}
+
+	public static LedgerEntry charge(Long walletId, long amount, long balanceAfter) {
+		return new LedgerEntry(walletId, LedgerType.CHARGE, amount, balanceAfter, null);
+	}
+}
