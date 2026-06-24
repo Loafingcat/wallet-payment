@@ -17,5 +17,17 @@ services:
       timeout: 5s
       retries: 10
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: wallet-rabbitmq
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # 관리 UI (http://localhost:15672, guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   wallet-mysql-data:

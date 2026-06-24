@@ -5,6 +5,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
 import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.containers.RabbitMQContainer;
 
 // @Container/@Testcontainers를 쓰지 않고 직접 start()한다. 그 둘을 쓰면 JUnit이 "이 컨테이너를
 // 선언한 테스트 클래스가 끝나면 멈춘다"고 가정하는데, 이 클래스는 여러 테스트 클래스가 상속해서
@@ -22,7 +23,11 @@ public abstract class IntegrationTestSupport {
 	@ServiceConnection
 	static final MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.0");
 
+	@ServiceConnection
+	static final RabbitMQContainer rabbitMq = new RabbitMQContainer("rabbitmq:3.13-management");
+
 	static {
 		mysql.start();
+		rabbitMq.start();
 	}
 }

@@ -2,6 +2,7 @@ package com.example.wallet.payment;
 
 import java.util.Optional;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,6 +33,7 @@ public class PaymentService {
 
 	private final WalletRepository walletRepository;
 	private final LedgerEntryRepository ledgerEntryRepository;
+	private final ApplicationEventPublisher eventPublisher;
 
 	@Transactional
 	public PaymentResponse pay(Long walletId, Long merchantId, long amount, String idempotencyKey) {
@@ -52,6 +54,11 @@ public class PaymentService {
 		} catch (DataIntegrityViolationException e) {
 			throw new DuplicateIdempotencyKeyException(idempotencyKey, e);
 		}
+
+		// publishEvent() 자체는 지금 호출되지만, PaymentEventPublisher의 리스너는 이 트랜잭션이
+		// 실제로 commit된 후에만 실행된다(@TransactionalEventListener AFTER_COMMIT).
+		eventPublisher.publishEvent(
+				new PaymentCompletedEvent(entry.getId(), walletId, merchantId, amount, wallet.getBalance()));
 
 		return new PaymentResponse(entry.getId(), walletId, merchantId, wallet.getBalance());
 	}
