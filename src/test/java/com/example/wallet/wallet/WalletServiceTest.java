@@ -3,6 +3,7 @@ package com.example.wallet.wallet;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
+import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,7 +34,7 @@ class WalletServiceTest extends IntegrationTestSupport {
 
 	@Test
 	void 충전하면_잔액이_충전금액만큼_증가한다() {
-		walletService.charge(walletId, 10_000L);
+		walletService.charge(walletId, 10_000L, newKey());
 
 		Wallet wallet = walletRepository.findById(walletId).orElseThrow();
 		assertThat(wallet.getBalance()).isEqualTo(10_000L);
@@ -41,9 +42,9 @@ class WalletServiceTest extends IntegrationTestSupport {
 
 	@Test
 	void 여러_번_충전해도_잔액은_원장_합계와_항상_일치한다() {
-		walletService.charge(walletId, 10_000L);
-		walletService.charge(walletId, 5_000L);
-		walletService.charge(walletId, 3_000L);
+		walletService.charge(walletId, 10_000L, newKey());
+		walletService.charge(walletId, 5_000L, newKey());
+		walletService.charge(walletId, 3_000L, newKey());
 
 		Wallet wallet = walletRepository.findById(walletId).orElseThrow();
 		List<LedgerEntry> entries = ledgerEntryRepository.findByWalletId(walletId);
@@ -51,5 +52,9 @@ class WalletServiceTest extends IntegrationTestSupport {
 
 		assertThat(wallet.getBalance()).isEqualTo(18_000L);
 		assertThat(wallet.getBalance()).isEqualTo(ledgerSum);
+	}
+
+	private String newKey() {
+		return UUID.randomUUID().toString();
 	}
 }

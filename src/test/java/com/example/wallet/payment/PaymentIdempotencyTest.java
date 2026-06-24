@@ -2,12 +2,12 @@ package com.example.wallet.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -15,19 +15,16 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.example.wallet.ledger.LedgerEntry;
 import com.example.wallet.ledger.LedgerEntryRepository;
 import com.example.wallet.support.IntegrationTestSupport;
 import com.example.wallet.wallet.Wallet;
 import com.example.wallet.wallet.WalletRepository;
 import com.example.wallet.wallet.WalletService;
 
-// 부모(IntegrationTestSupport)의 클래스 레벨 @Transactional을 NOT_SUPPORTED로 덮어써서 끈다.
-// 그 @Transactional은 테스트 메서드 전체를 하나의 트랜잭션으로 감싸고 끝나면 rollback하는데,
-// 그러면 메인 스레드가 setUp에서 insert한 Wallet이 "커밋되지 않은 상태"로 남아서 워커 스레드의
-// 별도 커넥션에서는 그 row가 안 보인다(동시성 테스트가 성립하지 않음). 그래서 이 테스트는 진짜
-// 커밋을 사용하고, 끝나고 나서 @AfterEach에서 직접 데이터를 지운다.
+// PaymentConcurrencyTest와 같은 이유로 NOT_SUPPORTED.
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
-class PaymentConcurrencyTest extends IntegrationTestSupport {
+class PaymentIdempotencyTest extends IntegrationTestSupport {
 
 	@Autowired
 	private PaymentService paymentService;
@@ -48,30 +45,41 @@ class PaymentConcurrencyTest extends IntegrationTestSupport {
 	}
 
 	@Test
-	void 비관적_락을_걸면_동시_결제_중_하나만_성공하고_잔액은_음수가_되지_않는다() throws InterruptedException {
+	void 같은_키로_두_번_결제해도_차감은_한_번만_일어난다() {
+		Wallet wallet = walletRepository.save(new Wallet(1L));
+		walletService.charge(wallet.getId(), 10_000L, UUID.randomUUID().toString());
+		String idempotencyKey = UUID.randomUUID().toString();
+
+		PaymentResponse first = paymentService.pay(wallet.getId(), 100L, 6_000L, idempotencyKey);
+		PaymentResponse second = paymentService.pay(wallet.getId(), 100L, 6_000L, idempotencyKey);
+
+		Wallet result = walletRepository.findById(wallet.getId()).orElseThrow();
+
+		assertThat(second).isEqualTo(first);
+		assertThat(result.getBalance()).isEqualTo(4_000L);
+	}
+
+	@Test
+	void 동시에_같은_키로_결제해도_한_번만_처리된다() throws InterruptedException {
 		Wallet wallet = walletRepository.save(new Wallet(1L));
 		walletService.charge(wallet.getId(), 10_000L, UUID.randomUUID().toString());
 		Long walletId = wallet.getId();
+		String idempotencyKey = UUID.randomUUID().toString();
 
 		int threadCount = 2;
 		ExecutorService executor = Executors.newFixedThreadPool(threadCount);
 		CountDownLatch readyLatch = new CountDownLatch(threadCount);
 		CountDownLatch startLatch = new CountDownLatch(1);
 		CountDownLatch doneLatch = new CountDownLatch(threadCount);
-		AtomicInteger successCount = new AtomicInteger();
-		AtomicInteger failCount = new AtomicInteger();
 
 		for (int i = 0; i < threadCount; i++) {
 			executor.submit(() -> {
 				readyLatch.countDown();
 				try {
 					startLatch.await();
-					// 각 스레드가 서로 다른 키를 쓴다 — 이 테스트는 락(동시성 직렬화)을 검증하는
-					// 것이고, 멱등성(같은 키 재사용)은 PaymentIdempotencyTest에서 따로 검증한다.
-					paymentService.pay(walletId, 100L, 6_000L, UUID.randomUUID().toString());
-					successCount.incrementAndGet();
-				} catch (Exception e) {
-					failCount.incrementAndGet();
+					paymentService.pay(walletId, 100L, 6_000L, idempotencyKey);
+				} catch (Exception ignored) {
+					// 위와 동일: UNIQUE 위반은 서비스 메서드 호출자(컨트롤러)가 처리하는 경로다.
 				} finally {
 					doneLatch.countDown();
 				}
@@ -84,11 +92,11 @@ class PaymentConcurrencyTest extends IntegrationTestSupport {
 		executor.shutdown();
 
 		Wallet result = walletRepository.findById(walletId).orElseThrow();
+		List<LedgerEntry> entries = ledgerEntryRepository.findByWalletId(walletId).stream()
+				.filter(e -> idempotencyKey.equals(e.getIdempotencyKey()))
+				.toList();
 
-		// 수정 확인: 둘 중 하나만 성공(잔액 4000), 나머지 하나는 잔액부족으로 실패. 음수 없음.
-		assertThat(successCount.get()).isEqualTo(1);
-		assertThat(failCount.get()).isEqualTo(1);
+		assertThat(entries).hasSize(1);
 		assertThat(result.getBalance()).isEqualTo(4_000L);
-		assertThat(result.getBalance()).isNotNegative();
 	}
 }

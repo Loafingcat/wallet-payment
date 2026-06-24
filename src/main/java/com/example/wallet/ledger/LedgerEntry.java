@@ -45,7 +45,9 @@ public class LedgerEntry {
 	@Column
 	private Long merchantId;
 
-	@Column
+	// 클라이언트가 보낸 Idempotency-Key. UNIQUE 제약이 "같은 키로 두 번 성공할 수 없다"를
+	// DB 레벨에서 보장해준다(ADR-003).
+	@Column(nullable = false, unique = true)
 	private String idempotencyKey;
 
 	@CreationTimestamp
@@ -62,11 +64,12 @@ public class LedgerEntry {
 		this.idempotencyKey = idempotencyKey;
 	}
 
-	public static LedgerEntry charge(Long walletId, long amount, long balanceAfter) {
-		return new LedgerEntry(walletId, LedgerType.CHARGE, amount, balanceAfter, null, null);
+	public static LedgerEntry charge(Long walletId, long amount, long balanceAfter, String idempotencyKey) {
+		return new LedgerEntry(walletId, LedgerType.CHARGE, amount, balanceAfter, null, idempotencyKey);
 	}
 
-	public static LedgerEntry payment(Long walletId, Long merchantId, long amount, long balanceAfter) {
-		return new LedgerEntry(walletId, LedgerType.PAYMENT, amount, balanceAfter, merchantId, null);
+	public static LedgerEntry payment(Long walletId, Long merchantId, long amount, long balanceAfter,
+			String idempotencyKey) {
+		return new LedgerEntry(walletId, LedgerType.PAYMENT, amount, balanceAfter, merchantId, idempotencyKey);
 	}
 }
