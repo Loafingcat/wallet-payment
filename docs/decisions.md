@@ -30,3 +30,14 @@
 - **결정**: `Merchant.feeRate`는 `BigDecimal`(예: `0.0250`)로 둔다. 기본값은 **2.5%**(사용자 결정). 정산액 계산은 `settlementAmount = totalPaymentAmount - totalRefundAmount - feeAmount`이고, `feeAmount = round(totalPaymentAmount * feeRate)`다 — 수수료는 환불 이후의 순액이 아니라 **결제 총액(gross) 기준**으로 계산한다.
 - **이유**: `BigDecimal`은 금액(ADR-001에서 `long`으로 고정)이 아니라 비율이라서 같은 제약을 받지 않는다. 비율은 정수로 표현하면(예: basis point) 가독성이 떨어지고, `BigDecimal`이 "2.5%"라는 의도를 그대로 드러낸다. 수수료의 계산 기준(gross)은 문제에서 준 공식("총결제액 − 환불 − 수수료")이 수수료를 환불과 독립적으로 빼는 형태라서 그대로 따랐다.
 - **LedgerEntry로 기록하지 않는 이유**: `LedgerType.SETTLEMENT_FEE`가 S1부터 enum에 있었지만, LedgerEntry는 `walletId`(사용자 지갑) 기준으로 잔액을 추적하는 원장이다. 수수료는 사용자 지갑에서 빠지는 돈이 아니라 "플랫폼이 가맹점에 지급할 금액에서 미리 떼는 몫"이라, 사용자 지갑에 묶일 이유가 없다. 그래서 수수료는 Settlement 집계 시점에 계산만 하고 별도 LedgerEntry를 만들지 않는다. 가맹점 자체의 정산용 원장(가맹점별 지급 내역)이 필요해지면 그때 `merchantId` 기준의 새로운 원장 개념을 따로 설계해야 한다.
+
+## ADR-005: 충전 경로의 낙관적 락 충돌 — 서버 재시도 대신 명확한 에러 응답
+
+- **날짜**: 2026-06-24
+- **배경**: `WalletService.charge()`는 `findById`(락 없음)로 지갑을 읽고 `@Version`에만 의존한다. 동시에 같은 지갑을 충전하면 늦게 flush되는 쪽이 `ObjectOptimisticLockingFailureException`을 받는데, 지금까지 이걸 잡는 코드가 없어서 일관되지 않은 500 에러로 새고 있었다.
+- **후보**:
+  1. 서버가 내부적으로 재시도(횟수/백오프 명시) — `payment/optimistic/`의 패턴을 재사용.
+  2. `ConcurrentChargeConflictException`(409)으로 변환해서 클라이언트에게 즉시 알리고, 재시도는 클라이언트가 같은 Idempotency-Key로 한다.
+- **결정**: 2번(사용자 결정).
+- **이유**: 결제 경로(`PaymentService`)는 충돌을 비관적 락으로 미리 막거나, 막을 수 없는 비즈니스 실패(잔액부족)는 재시도 없이 즉시 명확한 예외로 던진다 — "서버가 알아서 다시 시도한다"는 동작이 결제 경로엔 없다. 충전에 서버 재시도를 넣으면 같은 시스템 안에 두 가지 다른 실패 처리 철학이 생긴다. 또한 충돌이 난 트랜잭션은 잔액 변경과 LedgerEntry insert가 통째로 롤백되므로(흔적이 전혀 안 남으므로), 클라이언트가 **같은 Idempotency-Key로 재시도**하기만 하면 이중 충전 없이 안전하게 끝난다 — 서버가 재시도 루프를 또 만들 필요가 없다.
+- **멱등성과의 관계**: 충돌 시점에 `LedgerEntry`가 INSERT된 적이 없으므로(트랜잭션 전체 롤백), 재시도가 서버이든 클라이언트이든 "같은 키로 다시 시도 = 새 시도"이고 결과는 항상 정확히 1건만 반영된다. `WalletChargeConcurrencyTest`로 검증했다.

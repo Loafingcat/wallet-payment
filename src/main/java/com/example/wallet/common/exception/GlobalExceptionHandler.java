@@ -41,6 +41,11 @@ public class GlobalExceptionHandler {
 		return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse(e.getMessage()));
 	}
 
+	@ExceptionHandler(ConcurrentChargeConflictException.class)
+	public ResponseEntity<ErrorResponse> handleConcurrentChargeConflict(ConcurrentChargeConflictException e) {
+		return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse(e.getMessage()));
+	}
+
 	@ExceptionHandler(MethodArgumentNotValidException.class)
 	public ResponseEntity<ErrorResponse> handleInvalidArgument(MethodArgumentNotValidException e) {
 		String message = e.getBindingResult().getFieldErrors().stream()

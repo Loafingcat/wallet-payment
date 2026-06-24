@@ -3,9 +3,11 @@ package com.example.wallet.wallet;
 import java.util.Optional;
 
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.example.wallet.common.exception.ConcurrentChargeConflictException;
 import com.example.wallet.common.exception.DuplicateIdempotencyKeyException;
 import com.example.wallet.common.exception.IdempotencyKeyReusedException;
 import com.example.wallet.common.exception.WalletNotFoundException;
@@ -42,10 +44,18 @@ public class WalletService {
 
 		wallet.charge(amount);
 
+		// ADR-005: charge()는 findByIdForUpdate가 아니라 findById를 쓴다(락 없음) — Wallet의
+		// @Version만으로 동시 충전을 막는다. saveAndFlush가 영속성 컨텍스트 전체를 flush하면서
+		// wallet의 UPDATE ... WHERE version=?도 같이 나가는데, 동시에 같은 지갑을 충전한 다른
+		// 트랜잭션이 먼저 commit했다면 여기서 ObjectOptimisticLockingFailureException이 터진다.
+		// 결제 경로처럼 재시도하지 않고 바로 명확한 예외로 변환한다 — 이 트랜잭션은 통째로
+		// 롤백되어 LedgerEntry가 전혀 남지 않으므로, 같은 Idempotency-Key로 재시도하면 안전하다.
 		try {
 			ledgerEntryRepository.saveAndFlush(LedgerEntry.charge(walletId, amount, wallet.getBalance(), idempotencyKey));
 		} catch (DataIntegrityViolationException e) {
 			throw new DuplicateIdempotencyKeyException(idempotencyKey, e);
+		} catch (ObjectOptimisticLockingFailureException e) {
+			throw new ConcurrentChargeConflictException(walletId, e);
 		}
 
 		return new ChargeResponse(wallet.getId(), wallet.getBalance());
