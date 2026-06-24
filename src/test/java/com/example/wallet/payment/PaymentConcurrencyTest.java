@@ -47,7 +47,7 @@ class PaymentConcurrencyTest extends IntegrationTestSupport {
 	}
 
 	@Test
-	void 락_없이_동시에_결제하면_둘_다_성공해서_잔액이_음수가_된다() throws InterruptedException {
+	void 비관적_락을_걸면_동시_결제_중_하나만_성공하고_잔액은_음수가_되지_않는다() throws InterruptedException {
 		Wallet wallet = walletRepository.save(new Wallet(1L));
 		walletService.charge(wallet.getId(), 10_000L);
 		Long walletId = wallet.getId();
@@ -82,9 +82,10 @@ class PaymentConcurrencyTest extends IntegrationTestSupport {
 
 		Wallet result = walletRepository.findById(walletId).orElseThrow();
 
-		// 버그 증명: 둘 다 성공하고, 잔액이 음수가 된다(10000 - 6000 - 6000 = -2000).
-		assertThat(successCount.get()).isEqualTo(2);
-		assertThat(failCount.get()).isZero();
-		assertThat(result.getBalance()).isNegative();
+		// 수정 확인: 둘 중 하나만 성공(잔액 4000), 나머지 하나는 잔액부족으로 실패. 음수 없음.
+		assertThat(successCount.get()).isEqualTo(1);
+		assertThat(failCount.get()).isEqualTo(1);
+		assertThat(result.getBalance()).isEqualTo(4_000L);
+		assertThat(result.getBalance()).isNotNegative();
 	}
 }
