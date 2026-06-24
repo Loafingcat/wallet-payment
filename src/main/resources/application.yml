@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: wallet-payment
+  jpa:
+    open-in-view: false
+
+server:
+  port: 8080
+
+logging:
+  level:
+    root: INFO

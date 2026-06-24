@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/wallet?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul
+    username: wallet
+    password: wallet1234
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        format_sql: true
+
+logging:
+  level:
+    org.hibernate.SQL: debug

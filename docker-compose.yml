@@ -1,0 +1,21 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: wallet-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: wallet
+      MYSQL_USER: wallet
+      MYSQL_PASSWORD: wallet1234
+      MYSQL_ROOT_PASSWORD: root1234
+    volumes:
+      - wallet-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot1234"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  wallet-mysql-data:
