@@ -5,6 +5,8 @@ import java.time.LocalDateTime;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
+import com.example.wallet.common.exception.InsufficientBalanceException;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -52,5 +54,14 @@ public class Wallet {
 	// LedgerEntry를 함께 남겨야 "잔액 == 원장 합계"가 깨지지 않는다.
 	public void charge(long amount) {
 		this.balance += amount;
+	}
+
+	// 절대 규칙 1번: 잔액은 음수가 될 수 없다. 이 체크와 차감을 한 메서드 안에 묶어서,
+	// "확인 후 차감" 사이에 다른 트랜잭션이 끼어들 여지를 호출부가 만들지 못하게 한다.
+	public void pay(long amount) {
+		if (this.balance < amount) {
+			throw new InsufficientBalanceException(this.id);
+		}
+		this.balance -= amount;
 	}
 }

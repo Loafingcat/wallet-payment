@@ -41,6 +41,10 @@ public class LedgerEntry {
 	@Column(nullable = false)
 	private Long balanceAfter;
 
+	// 결제(PAYMENT) 거래에만 채워진다. 충전(CHARGE)에는 가맹점이 없으므로 null.
+	@Column
+	private Long merchantId;
+
 	@Column
 	private String idempotencyKey;
 
@@ -48,15 +52,21 @@ public class LedgerEntry {
 	@Column(nullable = false, updatable = false)
 	private LocalDateTime createdAt;
 
-	private LedgerEntry(Long walletId, LedgerType type, Long amount, Long balanceAfter, String idempotencyKey) {
+	private LedgerEntry(Long walletId, LedgerType type, Long amount, Long balanceAfter, Long merchantId,
+			String idempotencyKey) {
 		this.walletId = walletId;
 		this.type = type;
 		this.amount = amount;
 		this.balanceAfter = balanceAfter;
+		this.merchantId = merchantId;
 		this.idempotencyKey = idempotencyKey;
 	}
 
 	public static LedgerEntry charge(Long walletId, long amount, long balanceAfter) {
-		return new LedgerEntry(walletId, LedgerType.CHARGE, amount, balanceAfter, null);
+		return new LedgerEntry(walletId, LedgerType.CHARGE, amount, balanceAfter, null, null);
+	}
+
+	public static LedgerEntry payment(Long walletId, Long merchantId, long amount, long balanceAfter) {
+		return new LedgerEntry(walletId, LedgerType.PAYMENT, amount, balanceAfter, merchantId, null);
 	}
 }
