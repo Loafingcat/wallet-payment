@@ -10,4 +10,6 @@ public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, Long> 
 	List<LedgerEntry> findByWalletId(Long walletId);
 
 	Optional<LedgerEntry> findByIdempotencyKey(String idempotencyKey);
+
+	List<LedgerEntry> findByRefundOfEntryId(Long refundOfEntryId);
 }

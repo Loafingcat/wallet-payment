@@ -45,14 +45,15 @@ public class PaymentService {
 
 		wallet.pay(amount);
 
+		LedgerEntry entry;
 		try {
-			ledgerEntryRepository.saveAndFlush(
+			entry = ledgerEntryRepository.saveAndFlush(
 					LedgerEntry.payment(walletId, merchantId, amount, wallet.getBalance(), idempotencyKey));
 		} catch (DataIntegrityViolationException e) {
 			throw new DuplicateIdempotencyKeyException(idempotencyKey, e);
 		}
 
-		return new PaymentResponse(walletId, merchantId, wallet.getBalance());
+		return new PaymentResponse(entry.getId(), walletId, merchantId, wallet.getBalance());
 	}
 
 	// DuplicateIdempotencyKeyException을 잡은 컨트롤러가 호출한다.
@@ -67,6 +68,6 @@ public class PaymentService {
 		if (entry.getType() != LedgerType.PAYMENT) {
 			throw new IdempotencyKeyReusedException(idempotencyKey);
 		}
-		return new PaymentResponse(entry.getWalletId(), entry.getMerchantId(), entry.getBalanceAfter());
+		return new PaymentResponse(entry.getId(), entry.getWalletId(), entry.getMerchantId(), entry.getBalanceAfter());
 	}
 }

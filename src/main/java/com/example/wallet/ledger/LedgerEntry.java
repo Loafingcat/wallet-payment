@@ -41,9 +41,14 @@ public class LedgerEntry {
 	@Column(nullable = false)
 	private Long balanceAfter;
 
-	// 결제(PAYMENT) 거래에만 채워진다. 충전(CHARGE)에는 가맹점이 없으므로 null.
+	// 결제(PAYMENT)·환불(REFUND) 거래에만 채워진다. 충전(CHARGE)에는 가맹점이 없으므로 null.
 	@Column
 	private Long merchantId;
+
+	// REFUND 거래에만 채워진다. 환불 대상 PAYMENT LedgerEntry의 id를 가리킨다.
+	// "이 결제에 대해 지금까지 환불된 합계"를 구할 때 이 필드로 PAYMENT를 거꾸로 찾는다.
+	@Column
+	private Long refundOfEntryId;
 
 	// 클라이언트가 보낸 Idempotency-Key. UNIQUE 제약이 "같은 키로 두 번 성공할 수 없다"를
 	// DB 레벨에서 보장해준다(ADR-003).
@@ -55,21 +60,28 @@ public class LedgerEntry {
 	private LocalDateTime createdAt;
 
 	private LedgerEntry(Long walletId, LedgerType type, Long amount, Long balanceAfter, Long merchantId,
-			String idempotencyKey) {
+			Long refundOfEntryId, String idempotencyKey) {
 		this.walletId = walletId;
 		this.type = type;
 		this.amount = amount;
 		this.balanceAfter = balanceAfter;
 		this.merchantId = merchantId;
+		this.refundOfEntryId = refundOfEntryId;
 		this.idempotencyKey = idempotencyKey;
 	}
 
 	public static LedgerEntry charge(Long walletId, long amount, long balanceAfter, String idempotencyKey) {
-		return new LedgerEntry(walletId, LedgerType.CHARGE, amount, balanceAfter, null, idempotencyKey);
+		return new LedgerEntry(walletId, LedgerType.CHARGE, amount, balanceAfter, null, null, idempotencyKey);
 	}
 
 	public static LedgerEntry payment(Long walletId, Long merchantId, long amount, long balanceAfter,
 			String idempotencyKey) {
-		return new LedgerEntry(walletId, LedgerType.PAYMENT, amount, balanceAfter, merchantId, idempotencyKey);
+		return new LedgerEntry(walletId, LedgerType.PAYMENT, amount, balanceAfter, merchantId, null, idempotencyKey);
+	}
+
+	public static LedgerEntry refund(Long walletId, Long merchantId, long amount, long balanceAfter,
+			Long refundOfEntryId, String idempotencyKey) {
+		return new LedgerEntry(walletId, LedgerType.REFUND, amount, balanceAfter, merchantId, refundOfEntryId,
+				idempotencyKey);
 	}
 }
