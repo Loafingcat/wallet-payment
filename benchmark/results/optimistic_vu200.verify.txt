@@ -1,0 +1,2 @@
+wallet_id=7 balance=99993979 ledger_sum=99993979 entries=6022
+OK: balance == ledger_sum

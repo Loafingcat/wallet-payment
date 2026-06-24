@@ -29,7 +29,7 @@ public class OptimisticPaymentService {
 						writer.payOnce(walletId, merchantId, amount, idempotencyKey), attempt);
 			} catch (ObjectOptimisticLockingFailureException e) {
 				if (attempt == MAX_ATTEMPTS) {
-					throw e;
+					throw new OptimisticLockRetriesExhaustedException(attempt, e);
 				}
 				backoff(attempt);
 				// 재시도: 다음 시도에서 wallet을 처음부터 다시 읽는다. 그 사이에 이긴 쪽이

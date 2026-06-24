@@ -9,6 +9,8 @@ import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import com.example.wallet.payment.optimistic.OptimisticLockRetriesExhaustedException;
+
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -47,13 +49,21 @@ public class GlobalExceptionHandler {
 		return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse(e.getMessage()));
 	}
 
-	// OptimisticPaymentService가 재시도(MAX_ATTEMPTS)를 다 써도 충돌이 안 풀리면 이게 그대로
-	// 올라온다. charge()는 충돌 즉시 변환하지만, 이 경로는 "재시도까지 다 해보고도" 안 되는
-	// 경우라 의미가 달라서 별도 도메인 예외로 감싸지 않고 그대로 매핑만 한다.
-	@ExceptionHandler(ObjectOptimisticLockingFailureException.class)
-	public ResponseEntity<ErrorResponse> handleOptimisticLockExhausted(ObjectOptimisticLockingFailureException e) {
+	// OptimisticPaymentService가 재시도(MAX_ATTEMPTS)를 다 써도 충돌이 안 풀리면 이걸 던진다.
+	// 몇 번 시도하고 포기했는지를 X-Attempt-Count 헤더로 그대로 내보낸다 — 성공 응답(컨트롤러)
+	// 과 같은 헤더 이름을 쓰므로, 호출자는 성공/실패 어느 쪽이든 같은 헤더만 보면 된다.
+	@ExceptionHandler(OptimisticLockRetriesExhaustedException.class)
+	public ResponseEntity<ErrorResponse> handleOptimisticLockExhausted(OptimisticLockRetriesExhaustedException e) {
 		return ResponseEntity.status(HttpStatus.CONFLICT)
-				.body(new ErrorResponse("Optimistic lock retries exhausted"));
+				.header("X-Attempt-Count", String.valueOf(e.getAttempts()))
+				.body(new ErrorResponse(e.getMessage()));
+	}
+
+	// charge()는 OptimisticPaymentService와 달리 내부 재시도가 없어서, 충돌이 나면 이게
+	// 바로 올라온다(이 시점엔 attempts라는 개념 자체가 없다 — 한 번 시도하고 끝).
+	@ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+	public ResponseEntity<ErrorResponse> handleOptimisticLockConflict(ObjectOptimisticLockingFailureException e) {
+		return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse("Optimistic lock conflict"));
 	}
 
 	@ExceptionHandler(MethodArgumentNotValidException.class)

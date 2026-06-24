@@ -1,0 +1,17 @@
+# S8 부하 테스트 전용. local 프로파일 위에 얹어서 쓴다:
+#   --spring.profiles.active=local,benchmark
+# - Hikari 풀을 기본값(10)보다 훨씬 크게 잡아서, 측정되는 지연이 "DB 행 잠금 경합"을
+#   반영하게 한다. 풀이 작으면 VU를 늘려도 커넥션 획득 대기가 병목이 되어 버려서,
+#   비관적 락과 낙관적 락의 차이가 아니라 풀 크기의 차이를 측정하게 된다.
+# - SQL 로깅을 끈다 — local 프로파일의 debug 로그는 매 요청마다 콘솔 I/O를 발생시켜서
+#   고부하 측정 결과를 왜곡한다.
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 50
+
+logging:
+  level:
+    org.hibernate.SQL: warn
+    org.springframework.amqp: warn

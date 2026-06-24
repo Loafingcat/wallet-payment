@@ -14,3 +14,7 @@ bin/
 
 HELP.md
 .DS_Store
+
+# S8 부하 테스트는 실행마다 새 지갑/가맹점 id를 만든다 — 이 값은 그때그때 다르므로
+# 결과(results.csv, chart_*.png, *.json/log/verify.txt)와 달리 커밋하지 않는다.
+benchmark/results/env.sh
