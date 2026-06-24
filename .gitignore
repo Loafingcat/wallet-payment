@@ -9,6 +9,7 @@ build/
 *.iml
 *.ipr
 out/
+bin/
 .vscode/
 
 HELP.md
