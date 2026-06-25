@@ -19,6 +19,7 @@ import lombok.RequiredArgsConstructor;
 public class WalletController {
 
 	private final WalletService walletService;
+	private final TransferService transferService;
 
 	@PostMapping("/{id}/charge")
 	public ResponseEntity<ChargeResponse> charge(
@@ -30,6 +31,21 @@ public class WalletController {
 			response = walletService.charge(id, request.amount(), idempotencyKey);
 		} catch (DuplicateIdempotencyKeyException e) {
 			response = walletService.findChargeResultByIdempotencyKey(idempotencyKey);
+		}
+		return ResponseEntity.ok(response);
+	}
+
+	@PostMapping("/transfer")
+	public ResponseEntity<TransferResponse> transfer(
+			@RequestHeader("Idempotency-Key") String idempotencyKey,
+			@Valid @RequestBody TransferRequest request) {
+		TransferResponse response;
+		try {
+			response = transferService.transfer(request.fromWalletId(), request.toWalletId(), request.amount(),
+					idempotencyKey);
+		} catch (DuplicateIdempotencyKeyException e) {
+			response = transferService.findTransferResultByIdempotencyKey(request.fromWalletId(),
+					request.toWalletId(), request.amount(), idempotencyKey);
 		}
 		return ResponseEntity.ok(response);
 	}

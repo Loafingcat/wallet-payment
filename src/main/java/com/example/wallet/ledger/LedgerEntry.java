@@ -84,4 +84,18 @@ public class LedgerEntry {
 		return new LedgerEntry(walletId, LedgerType.REFUND, amount, balanceAfter, merchantId, refundOfEntryId,
 				idempotencyKey);
 	}
+
+	public static LedgerEntry transferOut(Long walletId, long amount, long balanceAfter, String idempotencyKey) {
+		return new LedgerEntry(walletId, LedgerType.TRANSFER_OUT, amount, balanceAfter, null, null, idempotencyKey);
+	}
+
+	public static LedgerEntry transferIn(Long walletId, long amount, long balanceAfter, String idempotencyKey) {
+		return new LedgerEntry(walletId, LedgerType.TRANSFER_IN, amount, balanceAfter, null, null, idempotencyKey);
+	}
+
+	// "이 거래가 잔액에 실제로 더한/뺀 값". type.sign()이 방향을 알고 있어서, 호출하는 쪽이
+	// type별로 분기할 필요가 없다 — 정합성 점검 배치(S11)가 지갑별 합계를 구할 때 쓴다.
+	public long signedAmount() {
+		return amount * type.sign();
+	}
 }
