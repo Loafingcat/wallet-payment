@@ -2,7 +2,6 @@ package com.example.wallet.payment;
 
 import java.util.Optional;
 
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,8 +12,12 @@ import com.example.wallet.common.exception.WalletNotFoundException;
 import com.example.wallet.ledger.LedgerEntry;
 import com.example.wallet.ledger.LedgerEntryRepository;
 import com.example.wallet.ledger.LedgerType;
+import com.example.wallet.outbox.OutboxEvent;
+import com.example.wallet.outbox.OutboxEventRepository;
 import com.example.wallet.wallet.Wallet;
 import com.example.wallet.wallet.WalletRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -27,13 +30,21 @@ import lombok.RequiredArgsConstructor;
 // 그대로 반환하고, 없으면 처리 후 idempotencyKey를 채워 INSERT한다. 동시에 같은 키로 들어온
 // 다른 요청이 먼저 커밋했다면 이 INSERT는 UNIQUE 제약 위반으로 실패하고, 이 트랜잭션 전체
 // (지갑 락 + 잔액 차감 포함)가 롤백된다.
+//
+// 이벤트 발행(S10, 아웃박스 패턴): S6에서는 @TransactionalEventListener(AFTER_COMMIT)로
+// "커밋 후 발행"했지만, 그 발행 자체가 실패하거나 그 직전에 프로세스가 죽으면 이벤트가
+// 영원히 사라지는 문제가 있었다(docs/outbox-pattern.md). 그래서 지금은 "발행해야 할
+// 이벤트가 있다"는 사실 자체를 OutboxEvent로 만들어 LedgerEntry와 같은 트랜잭션 안에서
+// INSERT한다 — 이러면 이 트랜잭션이 커밋되는 순간 이벤트도 항상 같이 살아남는다. 실제
+// RabbitMQ 발행은 OutboxRelay가 별도로, 트랜잭션 밖에서 한다.
 @Service
 @RequiredArgsConstructor
 public class PaymentService {
 
 	private final WalletRepository walletRepository;
 	private final LedgerEntryRepository ledgerEntryRepository;
-	private final ApplicationEventPublisher eventPublisher;
+	private final OutboxEventRepository outboxEventRepository;
+	private final ObjectMapper objectMapper;
 
 	@Transactional
 	public PaymentResponse pay(Long walletId, Long merchantId, long amount, String idempotencyKey) {
@@ -55,10 +66,8 @@ public class PaymentService {
 			throw new DuplicateIdempotencyKeyException(idempotencyKey, e);
 		}
 
-		// publishEvent() 자체는 지금 호출되지만, PaymentEventPublisher의 리스너는 이 트랜잭션이
-		// 실제로 commit된 후에만 실행된다(@TransactionalEventListener AFTER_COMMIT).
-		eventPublisher.publishEvent(
-				new PaymentCompletedEvent(entry.getId(), walletId, merchantId, amount, wallet.getBalance()));
+		outboxEventRepository.save(OutboxEvent.of("PaymentCompleted",
+				serialize(new PaymentCompletedEvent(entry.getId(), walletId, merchantId, amount, wallet.getBalance()))));
 
 		return new PaymentResponse(entry.getId(), walletId, merchantId, wallet.getBalance());
 	}
@@ -76,5 +85,13 @@ public class PaymentService {
 			throw new IdempotencyKeyReusedException(idempotencyKey);
 		}
 		return new PaymentResponse(entry.getId(), entry.getWalletId(), entry.getMerchantId(), entry.getBalanceAfter());
+	}
+
+	private String serialize(PaymentCompletedEvent event) {
+		try {
+			return objectMapper.writeValueAsString(event);
+		} catch (JsonProcessingException e) {
+			throw new IllegalStateException("Failed to serialize outbox payload", e);
+		}
 	}
 }

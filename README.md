@@ -124,6 +124,14 @@ CLAUDE.md 규칙대로 비관적 락을 기본으로 쓰고, 낙관적 락(`@Ver
 - **PG 호출은 절대 `@Transactional` 메서드 안에 들어가지 않습니다**(절대 규칙 6번, S6의 RabbitMQ 발행과 같은 원칙). `ExternalPaymentWriter`의 짧은 트랜잭션 세 개 사이에, 트랜잭션 없는 `ExternalPaymentService`가 PG 호출을 끼워 넣습니다.
 - 가짜 PG(`fake-pg/`, 별도 Spring Boot 모듈, 포트 9999)는 `X-Simulate-Failure` 헤더로 `timeout`/`error5xx`/`lost-response` 장애를 결정적으로 재현할 수 있습니다.
 
+## 메시지 유실 방지: Transactional Outbox (S10)
+
+S6에서 "DB 커밋 후 RabbitMQ 발행"(`@TransactionalEventListener(AFTER_COMMIT)`)으로 "커밋 전 발행" 문제는 막았지만, **"커밋은 됐는데 발행 직전에 프로세스가 죽으면 이벤트가 영원히 사라지는"** 문제가 남아있었습니다. 전체 비교와 테스트는 **[docs/outbox-pattern.md](docs/outbox-pattern.md)** 참고.
+
+- **`OutboxEvent`를 비즈니스 데이터(LedgerEntry)와 같은 로컬 트랜잭션에 INSERT합니다.** 그래서 결제 트랜잭션이 커밋되는 순간 "발행해야 할 이벤트가 있다"는 사실도 항상 같이 영속화됩니다 — 더 이상 메모리에만 잠깐 존재하는 상태가 아닙니다.
+- **`OutboxRelay`가 2초마다 `PENDING` 행을 읽어 RabbitMQ로 발행**하고, 성공한 것만 `PUBLISHED`로 표시합니다. 릴레이가 언제 죽든, 재시작하면 `PENDING` 행을 그대로 찾아서 다시 시도합니다 — **유실 0**(at-least-once).
+- 대신 "발행 성공 후 `PUBLISHED` 표시 전에 죽으면" 같은 메시지가 중복 발행될 수 있습니다 — S6에서 이미 만든 소비자 멱등성(`ProcessedPaymentEvent`)이 그대로 막아줍니다(새 코드 추가 없이).
+
 ## API 목록
 
 | Method | Path | 설명 | 헤더 |
@@ -138,6 +146,7 @@ CLAUDE.md 규칙대로 비관적 락을 기본으로 쓰고, 낙관적 락(`@Ver
 | POST | `/settlements/run?date=&merchantId=` | 정산 수동 트리거 | - |
 | GET | `/merchants/{id}/stats?from=&to=` | 가맹점별 기간 매출 | - |
 | GET | `/merchants/stats?from=&to=` | 전체 가맹점 기간 매출 | - |
+| POST | `/outbox/relay` | 아웃박스 발행 수동 트리거 | - |
 
 ## 실행 방법
 
@@ -166,4 +175,5 @@ CI: `main`/`master`로 push하거나 PR을 열면 GitHub Actions가 `./gradlew t
 - [docs/optimistic-vs-pessimistic-lock.md](docs/optimistic-vs-pessimistic-lock.md) — 락 전략 비교
 - [docs/benchmark.md](docs/benchmark.md) — k6 부하 테스트로 본 두 락의 실측 차이
 - [docs/distributed-consistency.md](docs/distributed-consistency.md) — 외부 PG 연동, 왜 2PC가 아니라 멱등성+상태기계+보정인지
-- `git log --oneline` — 단계별(S0~S7) 커밋 히스토리. 특히 `b0acfa9`(버그 재현) → `a9a79a8`(수정) 두 커밋의 diff가 이 프로젝트의 핵심입니다.
+- [docs/outbox-pattern.md](docs/outbox-pattern.md) — `@TransactionalEventListener` vs Transactional Outbox, 메시지 유실 방지
+- `git log --oneline` — 단계별(S0~S10) 커밋 히스토리. 특히 `b0acfa9`(버그 재현) → `a9a79a8`(수정) 두 커밋의 diff가 이 프로젝트의 핵심입니다.

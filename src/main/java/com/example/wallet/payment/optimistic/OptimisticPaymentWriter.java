@@ -2,17 +2,20 @@ package com.example.wallet.payment.optimistic;
 
 import java.util.Optional;
 
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.example.wallet.common.exception.WalletNotFoundException;
 import com.example.wallet.ledger.LedgerEntry;
 import com.example.wallet.ledger.LedgerEntryRepository;
+import com.example.wallet.outbox.OutboxEvent;
+import com.example.wallet.outbox.OutboxEventRepository;
 import com.example.wallet.payment.PaymentCompletedEvent;
 import com.example.wallet.payment.PaymentResponse;
 import com.example.wallet.wallet.Wallet;
 import com.example.wallet.wallet.WalletRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -28,7 +31,8 @@ public class OptimisticPaymentWriter {
 
 	private final WalletRepository walletRepository;
 	private final LedgerEntryRepository ledgerEntryRepository;
-	private final ApplicationEventPublisher eventPublisher;
+	private final OutboxEventRepository outboxEventRepository;
+	private final ObjectMapper objectMapper;
 
 	@Transactional
 	public PaymentResponse payOnce(Long walletId, Long merchantId, long amount, String idempotencyKey) {
@@ -50,11 +54,19 @@ public class OptimisticPaymentWriter {
 		LedgerEntry entry = ledgerEntryRepository.saveAndFlush(
 				LedgerEntry.payment(walletId, merchantId, amount, wallet.getBalance(), idempotencyKey));
 
-		// PaymentService와 동일하게 발행한다 — 부하 테스트(S8)에서 두 경로의 비교가
-		// "락 전략"만의 차이를 보여주도록, 메시징 오버헤드도 양쪽에 똑같이 둔다.
-		eventPublisher.publishEvent(
-				new PaymentCompletedEvent(entry.getId(), walletId, merchantId, amount, wallet.getBalance()));
+		// PaymentService와 동일하게 아웃박스에 적재한다(S10) — 부하 테스트(S8)에서 두 경로의
+		// 비교가 "락 전략"만의 차이를 보여주도록, 메시징 오버헤드도 양쪽에 똑같이 둔다.
+		outboxEventRepository.save(OutboxEvent.of("PaymentCompleted",
+				serialize(new PaymentCompletedEvent(entry.getId(), walletId, merchantId, amount, wallet.getBalance()))));
 
 		return new PaymentResponse(entry.getId(), walletId, merchantId, wallet.getBalance());
+	}
+
+	private String serialize(PaymentCompletedEvent event) {
+		try {
+			return objectMapper.writeValueAsString(event);
+		} catch (JsonProcessingException e) {
+			throw new IllegalStateException("Failed to serialize outbox payload", e);
+		}
 	}
 }
