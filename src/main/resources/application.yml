@@ -10,3 +10,15 @@ server:
 logging:
   level:
     root: INFO
+
+# S9: 가짜 PG(fake-pg 모듈, docker-compose 기준 9999 포트). 타임아웃을 짧게 잡아야
+# fake-pg의 timeout/lost-response 시뮬레이션이 실제로 우리 쪽 타임아웃을 유발한다.
+pg:
+  base-url: http://localhost:9999
+  connect-timeout-ms: 1000
+  read-timeout-ms: 1000
+
+payment:
+  reconciliation:
+    # PG에 기록이 아직 없어도(NOT_FOUND) 이 시간 안에는 "정말 실패"로 단정하지 않는다.
+    grace-period-ms: 10000

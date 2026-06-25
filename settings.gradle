@@ -1,1 +1,5 @@
 rootProject.name = 'wallet-payment'
+
+// fake-pg: S9에서 추가한 가짜 PG 시뮬레이터. 별도 Spring Boot 앱으로 분리해서, 우리 앱이
+// 진짜 네트워크 호출(타임아웃 가능, 응답 유실 가능)로 외부 시스템을 부르는 상황을 재현한다.
+include 'fake-pg'

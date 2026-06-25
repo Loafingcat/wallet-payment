@@ -5,3 +5,19 @@ spring:
     properties:
       hibernate:
         format_sql: true
+
+# IntegrationTestSupport가 fake-pg를 인프로세스로 19999 포트에 띄운다(개발자가 수동으로
+# 띄워놓은 fake-pg와 포트 충돌 안 나게 운영 기본값 9999와 다른 포트를 쓴다). 타임아웃은
+# fake-pg의 인위적 지연(3000ms)보다 짧게 잡아서 테스트가 실제로 타임아웃을 겪게 한다.
+pg:
+  base-url: http://localhost:19999
+  connect-timeout-ms: 500
+  read-timeout-ms: 800
+
+payment:
+  reconciliation:
+    # fake-pg의 인위적 지연(3000ms)보다 반드시 길어야 한다 — 짧으면 timeout 시나리오에서
+    # PG가 아직 처리 중인데 보정이 먼저 "유예 기간 지났다"며 FAILED로 단정해버린다(실제로
+    # 2000ms로 뒀다가 이 버그를 직접 만났다). 그러면서도 테스트가 오래 걸리지 않게 너무
+    # 길게는 안 잡는다.
+    grace-period-ms: 4000

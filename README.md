@@ -115,13 +115,25 @@ CLAUDE.md 규칙대로 비관적 락을 기본으로 쓰고, 낙관적 락(`@Ver
 - **재실행 멱등성**: `Settlement`는 `(merchantId, settlementDate)`에 UNIQUE 제약이 걸려 있고, 한 번 만들어지면 다시 계산하지 않는 **스냅샷**입니다. 같은 날짜를 두 번 정산해도 중복 행이 생기지 않고, 정산 이후에 같은 날 결제가 더 들어와도 이미 끝난 정산 결과는 바뀌지 않습니다(`SettlementBatchRunnerTest`로 검증).
 - **가맹점별·기간 매출 조회**: `GET /merchants/{id}/stats?from=&to=`, `GET /merchants/stats?from=&to=`가 같은 QueryDSL 집계 메서드를 재사용해 임의 기간 통계를 보여줍니다.
 
+## 외부 PG 연동과 분산 정합성
+
+`POST /payments`(S2)는 "우리 DB만 바꾸면 끝나는" 결제입니다. `POST /payments/external`(S9)은 거기에 **외부 PG 승인**이라는, 우리가 통제할 수 없는 변수를 추가합니다. 전체 설계(왜 2PC를 안 썼는지, 상태 다이어그램, 장애 케이스별 처리)는 **[docs/distributed-consistency.md](docs/distributed-consistency.md)** 참고. 핵심만 요약하면:
+
+- **`Payment` 엔티티는 의도적으로 가변입니다.** `LedgerEntry`(불변)와 달리 `PENDING_PG → APPROVED/FAILED`로 상태가 바뀝니다 — 이건 "확정된 사실"이 아니라 "지금까지 파악한 PG 승인 진행 상황"이기 때문입니다. 돈은 `APPROVED`(PG 승인 확인됨)가 되는 순간에만, `LedgerEntry` insert와 함께 움직입니다.
+- **타임아웃과 응답유실은 클라이언트 입장에서 증상이 같지만(응답 없음), PG 쪽 진실은 다릅니다**(아직 처리 전 vs 이미 처리 완료). 그래서 둘 다 일단 `PENDING_PG`로 유보하고, 보정(`PaymentReconciliationService`)이 PG에 직접 물어봐서(`GET /pg/payments/{key}`) 사후에 진실을 확정합니다. "응답을 못 받음"을 "실패"로 단정하지 않는 게 이 설계의 핵심입니다.
+- **PG 호출은 절대 `@Transactional` 메서드 안에 들어가지 않습니다**(절대 규칙 6번, S6의 RabbitMQ 발행과 같은 원칙). `ExternalPaymentWriter`의 짧은 트랜잭션 세 개 사이에, 트랜잭션 없는 `ExternalPaymentService`가 PG 호출을 끼워 넣습니다.
+- 가짜 PG(`fake-pg/`, 별도 Spring Boot 모듈, 포트 9999)는 `X-Simulate-Failure` 헤더로 `timeout`/`error5xx`/`lost-response` 장애를 결정적으로 재현할 수 있습니다.
+
 ## API 목록
 
 | Method | Path | 설명 | 헤더 |
 |---|---|---|---|
 | GET | `/health` | 헬스체크 | - |
 | POST | `/wallets/{id}/charge` | 충전 | `Idempotency-Key` |
-| POST | `/payments` | 결제 | `Idempotency-Key` |
+| POST | `/payments` | 결제 (우리 DB만, 비관적 락) | `Idempotency-Key` |
+| POST | `/payments/external` | 결제 (PG 승인 포함, S9) | `Idempotency-Key`, `X-Simulate-Failure`(선택) |
+| GET | `/payments/external/{id}` | 결제 상태 조회 | - |
+| POST | `/payments/external/{id}/reconcile` | 보정 수동 트리거 | - |
 | POST | `/payments/{id}/refund` | 환불(전액/부분) | `Idempotency-Key` |
 | POST | `/settlements/run?date=&merchantId=` | 정산 수동 트리거 | - |
 | GET | `/merchants/{id}/stats?from=&to=` | 가맹점별 기간 매출 | - |
@@ -130,10 +142,10 @@ CLAUDE.md 규칙대로 비관적 락을 기본으로 쓰고, 낙관적 락(`@Ver
 ## 실행 방법
 
 ```bash
-# 1. MySQL + RabbitMQ 띄우기
+# 1. MySQL + RabbitMQ + fake-pg(가짜 PG) 띄우기
 docker compose up -d
 
-# 2. 테스트 (Testcontainers가 MySQL/RabbitMQ를 자동으로 띄워서 검증)
+# 2. 테스트 (Testcontainers가 MySQL/RabbitMQ를, fake-pg는 인프로세스로 자동 기동해서 검증)
 ./gradlew test
 
 # 3. 앱 실행 (local 프로파일)
@@ -144,6 +156,7 @@ curl http://localhost:8080/health
 ```
 
 RabbitMQ 관리 UI: http://localhost:15672 (guest/guest)
+가짜 PG: http://localhost:9999 (단독 실행: `./gradlew :fake-pg:bootRun`)
 
 CI: `main`/`master`로 push하거나 PR을 열면 GitHub Actions가 `./gradlew test`를 자동 실행합니다(`.github/workflows/ci.yml`) — Testcontainers는 러너에 이미 있는 Docker를 그대로 씁니다.
 
@@ -151,4 +164,6 @@ CI: `main`/`master`로 push하거나 PR을 열면 GitHub Actions가 `./gradlew t
 
 - [docs/decisions.md](docs/decisions.md) — ADR 전체 (금액 타입, 멱등키 저장 방식, 수수료율 등)
 - [docs/optimistic-vs-pessimistic-lock.md](docs/optimistic-vs-pessimistic-lock.md) — 락 전략 비교
+- [docs/benchmark.md](docs/benchmark.md) — k6 부하 테스트로 본 두 락의 실측 차이
+- [docs/distributed-consistency.md](docs/distributed-consistency.md) — 외부 PG 연동, 왜 2PC가 아니라 멱등성+상태기계+보정인지
 - `git log --oneline` — 단계별(S0~S7) 커밋 히스토리. 특히 `b0acfa9`(버그 재현) → `a9a79a8`(수정) 두 커밋의 diff가 이 프로젝트의 핵심입니다.

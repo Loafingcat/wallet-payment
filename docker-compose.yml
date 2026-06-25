@@ -29,5 +29,13 @@ services:
       timeout: 5s
       retries: 10
 
+  fake-pg:
+    build:
+      context: .
+      dockerfile: fake-pg/Dockerfile
+    container_name: wallet-fake-pg
+    ports:
+      - "9999:9999"
+
 volumes:
   wallet-mysql-data:

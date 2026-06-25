@@ -1,0 +1,32 @@
+// S9: 외부 PG를 시뮬레이션하는 별도 Spring Boot 앱. 루트 프로젝트(wallet-payment)와
+// 완전히 독립된 모듈이라, 진짜로 네트워크(HTTP)를 거쳐야만 서로 통신할 수 있다 —
+// in-process mock이 아니라 실제 타임아웃/응답유실을 일으킬 수 있는 진짜 경계다.
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '3.5.15'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(17)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
