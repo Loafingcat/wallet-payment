@@ -20,11 +20,10 @@ import org.springframework.transaction.annotation.Transactional;
 import com.example.wallet.ledger.LedgerEntryRepository;
 import com.example.wallet.support.IntegrationTestSupport;
 
-// S11 1단계 "버그 재현": TransferService.transfer()가 fromWalletId→toWalletId 순서
-// 그대로(정렬 없이) 락을 건다. A→B 송금과 B→A 송금이 동시에 들어오면, 하나는 A를 먼저
-// 잠그고 B를 기다리고, 다른 하나는 B를 먼저 잠그고 A를 기다리는 순환 대기가 생길 수 있다 —
-// MySQL InnoDB가 그 순환을 감지해서 둘 중 하나를 강제로 죽인다(데드락 희생자). 다음 커밋
-// (락 순서를 지갑 id 오름차순으로 고정)에서 이 문제를 없앤다.
+// S11-2: 락 순서를 지갑 id 오름차순으로 고정한 뒤, 같은 시나리오(A→B/B→A 동시 송금
+// 여러 쌍)를 다시 돌려서 데드락이 더 이상 발생하지 않는지 확인한다. 이 테스트의 이전
+// 버전(git log의 S11-1 커밋 참고)은 정렬 없는 락이 데드락을 일으킨다는 걸 증명했었다 —
+// 지금은 반대로 "데드락이 발생하지 않는다"와 "모든 송금이 끝까지 성공한다"를 증명한다.
 //
 // 부모의 클래스 레벨 @Transactional을 끄는 이유는 PaymentConcurrencyTest와 같다: 워커
 // 스레드가 메인 스레드와 별도 커넥션을 쓰므로, 메인 스레드의 변경이 진짜 커밋돼 있어야
@@ -48,7 +47,7 @@ class TransferDeadlockTest extends IntegrationTestSupport {
 	}
 
 	@Test
-	void 락_순서를_고정하지_않으면_반대_방향_동시_송금이_데드락을_일으킨다() throws InterruptedException {
+	void 락_순서를_고정하면_반대_방향_동시_송금에서도_데드락이_발생하지_않는다() throws InterruptedException {
 		Wallet walletA = new Wallet(9101L);
 		walletA.charge(1_000_000L);
 		walletRepository.save(walletA);
@@ -60,9 +59,8 @@ class TransferDeadlockTest extends IntegrationTestSupport {
 		Long aId = walletA.getId();
 		Long bId = walletB.getId();
 
-		// 한 쌍(A→B, B→A)만으로는 둘 다 "첫 번째 락"을 잡기 전에 한쪽이 먼저 끝나버려서
-		// 데드락 없이 그냥 순차 처리될 수 있다(타이밍 의존적). 여러 쌍을 동시에 쏴서 적어도
-		// 한 쌍은 반드시 겹치는 타이밍 창에 들어가게 만든다.
+		// 정렬 전(S11-1) 데드락을 재현했던 것과 똑같은 부하(양방향 10쌍 동시) — 같은
+		// 조건에서 더 이상 데드락이 안 난다는 걸 보여줘야 의미가 있다.
 		int pairsPerDirection = 10;
 		int threadCount = pairsPerDirection * 2;
 		ExecutorService executor = Executors.newFixedThreadPool(threadCount);
@@ -84,9 +82,15 @@ class TransferDeadlockTest extends IntegrationTestSupport {
 		doneLatch.await(30, TimeUnit.SECONDS);
 		executor.shutdown();
 
-		// 수정 확인: 락 순서가 고정돼 있지 않으면 적어도 한 번은 데드락(상호 대기)이 발생한다.
-		assertThat(deadlocks).isNotEmpty();
+		assertThat(deadlocks).isEmpty();
 		assertThat(otherFailures).isEmpty();
+
+		// 같은 금액(10)을 양방향으로 같은 횟수(10번씩) 주고받았으니 순환 상쇄돼서 둘 다
+		// 원래 잔액(1,000,000)으로 돌아와야 한다 — 락이 제대로 걸렸다는 간접 증거.
+		Wallet resultA = walletRepository.findById(aId).orElseThrow();
+		Wallet resultB = walletRepository.findById(bId).orElseThrow();
+		assertThat(resultA.getBalance()).isEqualTo(1_000_000L);
+		assertThat(resultB.getBalance()).isEqualTo(1_000_000L);
 	}
 
 	private void runTransfer(Long fromId, Long toId, CountDownLatch readyLatch, CountDownLatch startLatch,
