@@ -132,6 +132,18 @@ S6에서 "DB 커밋 후 RabbitMQ 발행"(`@TransactionalEventListener(AFTER_COMM
 - **`OutboxRelay`가 2초마다 `PENDING` 행을 읽어 RabbitMQ로 발행**하고, 성공한 것만 `PUBLISHED`로 표시합니다. 릴레이가 언제 죽든, 재시작하면 `PENDING` 행을 그대로 찾아서 다시 시도합니다 — **유실 0**(at-least-once).
 - 대신 "발행 성공 후 `PUBLISHED` 표시 전에 죽으면" 같은 메시지가 중복 발행될 수 있습니다 — S6에서 이미 만든 소비자 멱등성(`ProcessedPaymentEvent`)이 그대로 막아줍니다(새 코드 추가 없이).
 
+## 송금 데드락과 잔액 정합성 점검 (S11)
+
+지갑 간 송금은 결제와 달리 **지갑 두 개를 한 트랜잭션에서 동시에** 잠가야 한다 — 그러자 비관적 락 자체가 새로운 문제(데드락)를 만들 수 있다는 게 드러났다. 그리고 "원장 기반 설계라 잔액과 원장이 항상 같다"는 보장은 코드 경로가 그렇게 짜여 있다는 뜻일 뿐, 운영 중 한 번도 안 어긋난다는 보장은 아니다 — 그래서 주기적으로 직접 확인하는 배치를 뒀다. 둘 다 실무 결제 시스템에서 "돈이 보이지 않는 곳에서 새거나 멈추지 않는다"를 보장하는 데 핵심적인 장치다.
+
+### 데드락 재현과 해결
+
+A→B 송금과 B→A 송금이 동시에 들어오면, 인자 순서 그대로 지갑을 잠그는 구현은 하나는 A를 먼저 잠그고 B를 기다리고 다른 하나는 B를 먼저 잠그고 A를 기다리는 **순환 대기**에 빠질 수 있다 — MySQL이 둘 중 하나를 강제로 죽인다(데드락). `TransferDeadlockTest`(커밋 `5c4c23a`)로 먼저 재현하고, **두 지갑 중 id가 더 작은 쪽을 항상 먼저 잠그는** 전역 락 순서로 해결했다(커밋 `b56604e`) — 모든 송금이 항상 같은 순서로 락을 요청하게 되므로 순환 대기 자체가 구조적으로 불가능해진다. 락 순서를 고정해도 남는 "단순 대기"는 트랜잭션 세션의 `innodb_lock_wait_timeout`을 3초로 줄여서 상한을 둔다. 전체 설명과 타임아웃 힌트가 실제로는 적용되지 않았던 시행착오는 **[docs/deadlock-prevention.md](docs/deadlock-prevention.md)** 참고.
+
+### 잔액 정합성 점검 배치
+
+`BalanceReconciliationService`가 모든 지갑의 캐시 잔액(`Wallet.balance`)과 원장 합계(`LedgerEntry` 누적, QueryDSL로 DB에서 직접 집계)를 비교해서 어긋난 지갑을 찾는다. 매일 새벽 2시 자동 실행되고, `POST /reconciliation/run`으로 수동 트리거할 수도 있다. **불일치를 발견해도 자동으로 고치지 않는다** — 불일치 자체가 버그의 신호인데 조용히 덮어쓰면 그 신호를 영영 놓친다. 대신 `BalanceDiscrepancy`에 기록을 남겨 사람이 조사하게 한다. 이유 전체는 **[docs/balance-reconciliation.md](docs/balance-reconciliation.md)** 참고.
+
 ## API 목록
 
 | Method | Path | 설명 | 헤더 |
@@ -147,6 +159,8 @@ S6에서 "DB 커밋 후 RabbitMQ 발행"(`@TransactionalEventListener(AFTER_COMM
 | GET | `/merchants/{id}/stats?from=&to=` | 가맹점별 기간 매출 | - |
 | GET | `/merchants/stats?from=&to=` | 전체 가맹점 기간 매출 | - |
 | POST | `/outbox/relay` | 아웃박스 발행 수동 트리거 | - |
+| POST | `/wallets/transfer` | 지갑 간 송금 | `Idempotency-Key` |
+| POST | `/reconciliation/run` | 잔액 정합성 점검 수동 트리거 | - |
 
 ## 실행 방법
 
@@ -176,4 +190,6 @@ CI: `main`/`master`로 push하거나 PR을 열면 GitHub Actions가 `./gradlew t
 - [docs/benchmark.md](docs/benchmark.md) — k6 부하 테스트로 본 두 락의 실측 차이
 - [docs/distributed-consistency.md](docs/distributed-consistency.md) — 외부 PG 연동, 왜 2PC가 아니라 멱등성+상태기계+보정인지
 - [docs/outbox-pattern.md](docs/outbox-pattern.md) — `@TransactionalEventListener` vs Transactional Outbox, 메시지 유실 방지
-- `git log --oneline` — 단계별(S0~S10) 커밋 히스토리. 특히 `b0acfa9`(버그 재현) → `a9a79a8`(수정) 두 커밋의 diff가 이 프로젝트의 핵심입니다.
+- [docs/deadlock-prevention.md](docs/deadlock-prevention.md) — 송금 데드락 재현·해결, 락 순서 고정과 락 타임아웃
+- [docs/balance-reconciliation.md](docs/balance-reconciliation.md) — 잔액 정합성 점검 배치, 왜 자동으로 고치지 않는지
+- `git log --oneline` — 단계별(S0~S11) 커밋 히스토리. 특히 `b0acfa9`(버그 재현) → `a9a79a8`(수정), `5c4c23a`(데드락 재현) → `b56604e`(수정) 커밋들의 diff가 이 프로젝트의 핵심입니다.
