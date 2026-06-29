@@ -12,6 +12,161 @@
 
 사전 준비: Docker Desktop이 켜져 있어야 합니다(Testcontainers가 MySQL/RabbitMQ를 자동으로 띄웁니다). `./gradlew test`가 한 번 정상적으로 돌아가는지 먼저 확인하세요.
 
+**자바를 잘 모른다면 Day 1로 바로 가지 말고 [Day 0](#day-0--이-코드를-읽기-위한-최소-자바-문법)부터 읽으세요.** Day 1~7의 모든 코드 설명은 "이 정도 문법은 읽을 수 있다"를 전제로 쓰여 있습니다. Day 0은 그 전제를 채워주는, 이 프로젝트에 실제로 나오는 문법만 모은 사전입니다(자바 전체를 가르치는 게 아니라, 딱 이 코드를 읽는 데 필요한 만큼만).
+
+---
+
+## Day 0 — 이 코드를 읽기 위한 최소 자바 문법
+
+이 섹션의 목표는 "자바 전문가 되기"가 아니라 **"Day 1~7에서 보여줄 코드 조각을 읽고 의미를 알아채기"**입니다. 모든 예시는 실제로 이 프로젝트 안에 있는 코드입니다. 한 번 읽고 다 외울 필요 없습니다 — Day 1~7을 읽다가 막히면 이 섹션으로 돌아오세요(Ctrl+F로 검색하면서 보는 용도입니다).
+
+### 클래스, 필드, 메서드 — 가장 기본 틀
+
+```java
+public class Wallet {
+    private Long balance;       // 필드: 이 객체가 들고 있는 데이터
+
+    public void charge(long amount) {  // 메서드: 이 객체가 할 수 있는 동작
+        this.balance += amount;
+    }
+}
+```
+
+`class`는 "이런 데이터(필드)와 이런 동작(메서드)을 가진 물건의 설계도"입니다. `Wallet`이라는 설계도로 실제 지갑 객체를 여러 개 만들 수 있습니다(지갑마다 `balance` 값은 다르지만 `charge()`라는 동작은 똑같이 가짐). `private`은 "이 클래스 밖에서는 직접 못 건드린다"는 뜻이고, `public`은 "밖에서도 쓸 수 있다"는 뜻입니다 — `Wallet.balance`가 `private`인 이유가 바로 [Day 1](#day-1--도메인-기초-왜-잔액이-아니라-원장이-진실인가-s0-s1)의 핵심입니다: 잔액을 함부로 못 바꾸게, `charge()`/`pay()`라는 정해진 문을 통해서만 바꾸게 막아둔 것.
+
+### 애너테이션(`@무언가`) — 코드가 아니라 "표시", "지시문"
+
+```java
+@Service
+@RequiredArgsConstructor
+public class WalletService {
+```
+
+`@`로 시작하는 줄은 **실행되는 코드가 아니라, 프레임워크(Spring)에게 주는 메모**입니다. "이 클래스는 OO 역할을 한다"고 표시해두면, Spring이 그걸 보고 알아서 처리해줍니다. 이 프로젝트에 반복해서 나오는 것들:
+
+| 애너테이션 | 뜻(읽는 법) |
+|---|---|
+| `@Service`, `@Component`, `@Repository` | "이 클래스의 객체를 Spring이 자동으로 하나 만들어서 관리해줘" (이렇게 관리되는 객체를 **빈(Bean)**이라고 부릅니다) |
+| `@RestController` | "이 클래스는 HTTP 요청을 받는 API 창구다" |
+| `@Entity` | "이 클래스는 DB 테이블 한 줄(row)과 1:1로 대응한다" |
+| `@Transactional` | "이 메서드 전체를 하나의 트랜잭션으로 묶어줘"([Day 1](#day-1--도메인-기초-왜-잔액이-아니라-원장이-진실인가-s0-s1)에서 자세히) |
+| `@Lock(...)` | "이 조회는 DB 행 잠금을 걸고 읽어줘"([Day 2](#day-2--동시성-i-같은-지갑에-동시-결제가-들어오면-s2)) |
+| `@Version` | "이 필드를 낙관적 락의 버전 번호로 써줘"([Day 4](#day-4--비동기-메시징과-락-전략-실측-s6-s7-s8)) |
+| `@Scheduled(...)` | "이 메서드를 정해진 시간/주기마다 자동으로 실행해줘" |
+
+### 생성자와 "의존성 주입" — `@RequiredArgsConstructor`
+
+```java
+@Service
+@RequiredArgsConstructor
+public class PaymentService {
+    private final WalletRepository walletRepository;
+    private final LedgerEntryRepository ledgerEntryRepository;
+    // ...
+}
+```
+
+`PaymentService`가 일하려면 `WalletRepository`(지갑 조회 도구)와 `LedgerEntryRepository`(원장 조회 도구)가 필요합니다. 그런데 이 클래스 안에서 `new WalletRepository()`처럼 직접 만들지 않습니다 — **Spring이 미리 만들어둔 빈을 "꽂아"줍니다.** 이걸 **의존성 주입(Dependency Injection)**이라고 합니다. 보통 자바에서는 이렇게 "필요한 걸 미리 다 받아서 저장하는" 생성자를 직접 써야 하는데, `@RequiredArgsConstructor`(Lombok 라이브러리 기능)는 `final` 필드들을 보고 그 생성자를 **자동으로 만들어줍니다** — 그래서 이 프로젝트의 서비스 클래스들에 생성자 코드가 안 보이는 겁니다(있는데, 컴파일할 때 자동으로 생겨서 안 보일 뿐입니다).
+
+### `Optional<T>` — "있을 수도, 없을 수도 있다"를 타입으로 표현
+
+```java
+Optional<LedgerEntry> existing = ledgerEntryRepository.findByIdempotencyKey(idempotencyKey);
+if (existing.isPresent()) {
+    return toPaymentResponse(existing.get(), idempotencyKey);
+}
+```
+
+`findByIdempotencyKey`로 찾았는데 없을 수도 있습니다(아직 그 키로 처리한 적이 없으면). 그럴 때 `null`을 그냥 돌려주면, 호출한 쪽이 깜빡하고 `null` 체크를 안 해서 터지는 버그(`NullPointerException`)가 정말 자주 생깁니다. `Optional<T>`는 "이 값은 있을 수도 없을 수도 있으니 꼭 확인하고 써라"를 타입 시스템으로 강제하는 상자입니다. `.isPresent()`(있나?), `.get()`(꺼내기), `.orElseThrow(...)`(없으면 예외를 던지고, 있으면 바로 꺼내기 — 이 프로젝트에서 가장 많이 쓰는 패턴)이 자주 보입니다.
+
+`<T>`처럼 꺽쇠 괄호로 타입을 넣는 걸 **제네릭**이라고 합니다. `Optional<LedgerEntry>`는 "안에 `LedgerEntry`가 들어있을 수도 있는 상자", `List<LedgerEntry>`는 "`LedgerEntry`들의 목록"이라고 읽으면 됩니다.
+
+### 람다(`() -> ...`) — "나중에 실행할 코드 조각"을 값처럼 넘기기
+
+```java
+Wallet wallet = walletRepository.findByIdForUpdate(walletId)
+        .orElseThrow(() -> new WalletNotFoundException(walletId));
+```
+
+`() -> new WalletNotFoundException(walletId)`는 "지갑이 없으면 **이때 가서** `WalletNotFoundException`을 만들어서 던져라"는 뜻입니다. `()`는 "입력값 없음", `->` 뒤는 "실행할 내용"입니다. 왜 미리 만들어서 넘기지 않고 이렇게 람다로 넘길까요 — `orElseThrow`가 호출되는 시점은 "값이 진짜 없을 때"뿐인데, 만약 `new WalletNotFoundException(walletId)`를 미리 만들어두면 **값이 있어도 항상 예외 객체를 만드는 비용**이 듭니다. 람다로 넘기면 "정말 필요할 때만" 실행됩니다.
+
+비슷하게 `LedgerEntry::getAmount`처럼 `클래스::메서드` 모양도 나오는데, 이건 "각 `LedgerEntry`에 대해 `getAmount()`를 호출해라"를 줄여 쓴 람다입니다(`entry -> entry.getAmount()`와 같은 뜻).
+
+### `record` — 필드만 나열하면 끝나는 데이터 묶음
+
+```java
+public record TransferRequest(
+        @NotNull Long fromWalletId,
+        @NotNull Long toWalletId,
+        @Positive Long amount) {
+}
+```
+
+API 요청/응답처럼 "데이터만 담으면 되는, 한 번 만들면 안 바뀌는 객체"를 보통 자바 클래스로 만들면 필드 선언 + 생성자 + getter를 다 손으로 써야 합니다. `record`는 필드 목록만 써주면 생성자·getter(`.fromWalletId()`처럼 필드명 그대로 메서드가 생김)·`equals`/`toString`을 **자동으로 만들어줍니다.** 이 프로젝트의 `~Request`/`~Response` 클래스들이 거의 다 `record`입니다.
+
+### 예외(exception) — `try`/`catch`/`throw`
+
+```java
+try {
+    ledgerEntryRepository.saveAndFlush(...);
+} catch (DataIntegrityViolationException e) {
+    throw new DuplicateIdempotencyKeyException(idempotencyKey, e);
+}
+```
+
+`throw`는 "여기서 더 진행 못 하니, 이 에러를 호출한 쪽으로 던진다"는 뜻입니다. 던져진 예외는 그 메서드를 호출한 쪽, 또 그걸 호출한 쪽으로 계속 거슬러 올라가다가, 누군가 `catch`로 "내가 이 에러를 받아서 처리하겠다"고 하면 거기서 멈춥니다. 위 코드는 "DB에 저장하다가 제약(UNIQUE) 위반이 나면, 그걸 좀 더 의미 있는 이름의 우리 예외(`DuplicateIdempotencyKeyException`)로 바꿔서 다시 던진다"는 뜻입니다. `WalletNotFoundException`, `InsufficientBalanceException`처럼 `~Exception`으로 끝나는 이름들은 모두 "이런 상황에선 정상적으로 진행할 수 없다"를 표현하려고 이 프로젝트가 직접 만든 예외 클래스들입니다.
+
+### Stream — 목록을 변형하는 파이프라인
+
+```java
+List<LedgerEntry> refunds = ledgerEntryRepository.findByRefundOfEntryId(paymentId);
+return refunds.stream().mapToLong(LedgerEntry::getAmount).sum();
+```
+
+"환불 내역 목록을 가져와서, 각각의 금액만 뽑아서, 다 더한다"를 한 줄로 쓴 것입니다. `.stream()`(목록을 파이프라인에 올리기) → `.mapToLong(...)`(각 항목을 숫자로 변환) → `.sum()`(다 더하기). `for`문으로 누적 변수를 만들어 더하는 것과 결과는 같지만, "무엇을 하는지"가 더 짧게 드러납니다. `.filter(...)`(조건에 맞는 것만 남기기), `.map(...)`(각 항목을 다른 모양으로 바꾸기), `.toList()`(다시 목록으로 모으기)도 자주 보입니다.
+
+### `enum` — 정해진 값들의 집합
+
+```java
+public enum LedgerType {
+    CHARGE(1), PAYMENT(-1), REFUND(1), TRANSFER_OUT(-1), TRANSFER_IN(1);
+}
+```
+
+"거래 종류는 딱 이 몇 가지뿐이다"를 표현하는 타입입니다. 문자열(`"CHARGE"`)로 관리하면 오타가 나도 컴파일러가 못 잡아주는데, `enum`으로 만들면 `LedgerType.CHARGE`처럼 정해진 것만 쓸 수 있어서 오타 자체가 불가능합니다.
+
+### 인터페이스, 그리고 Spring Data JPA의 "마법"
+
+```java
+public interface WalletRepository extends JpaRepository<Wallet, Long> {
+    Optional<Wallet> findByIdForUpdate(@Param("id") Long id);
+}
+```
+
+`interface`는 "이런 메서드들이 있을 것이다"라는 **약속(명세)**만 적어둔 것이고, 실제 동작(구현)은 없습니다. 신기한 점: 이 프로젝트 어디에도 `WalletRepository`의 구현체(실제 SQL을 실행하는 코드)가 안 보입니다 — **Spring Data JPA가 이 인터페이스를 보고, 메서드 이름과 어노테이션을 분석해서 구현체를 실행 시점에 자동으로 만들어줍니다.** `findByIdForUpdate`처럼 직접 쿼리를 적어둔(`@Query` 애너테이션) 것도 있고, `findByWalletId`처럼 이름만 보고 Spring이 알아서 "`walletId` 컬럼으로 찾는 쿼리"를 만들어주는 것도 있습니다.
+
+### `switch` 표현식 — 값을 바로 돌려주는 분기
+
+```java
+return switch (result.outcome()) {
+    case APPROVED -> writer.confirmApproved(payment.getId());
+    case DEFINITELY_FAILED -> writer.markFailed(payment.getId(), result.detail());
+    case UNKNOWN -> payment;
+};
+```
+
+옛날 자바의 `switch`는 분기만 하고 값을 직접 돌려주진 못했는데, 최신 문법은 `case 조건 -> 결과`로 **각 경우의 결과값을 바로 적고, 전체를 `return`**할 수 있습니다. 위 코드는 "PG 응답이 승인이면 승인 처리한 결과를, 확정 실패면 실패 처리한 결과를, 모르겠으면(`UNKNOWN`) 원래 payment를 그대로 돌려준다"는 뜻입니다.
+
+### Spring의 핵심 그림 한 장
+
+```
+[HTTP 요청] → @RestController(창구) → @Service(업무 로직) → @Repository(DB 접근)
+                                            ↑
+                              @Transactional이 여기서 트랜잭션 경계를 만듦
+```
+
+Spring은 `@Service`, `@Repository` 같은 애너테이션이 붙은 클래스들의 객체(**빈**)를 자기가 다 만들어서 갖고 있다가, 다른 빈이 필요로 하면 생성자를 통해 "꽂아줍니다"(의존성 주입, 위에서 본 `@RequiredArgsConstructor`). 그리고 `@Transactional`이 붙은 메서드를 부를 때는, 실제 객체가 아니라 Spring이 한 겹 씌운 **대리인(프록시)**을 거치게 만들어서 "트랜잭션 시작 → 원래 메서드 실행 → 성공하면 커밋, 예외가 나면 롤백"을 자동으로 해줍니다. 이 "한 겹 씌운 대리인을 거친다"는 사실이 [Day 4](#day-4--비동기-메시징과-락-전략-실측-s6-s7-s8)의 self-invocation 문제(같은 클래스 안에서 직접 호출하면 그 대리인을 안 거쳐서 트랜잭션이 무효화되는 함정)를 이해하는 데 꼭 필요합니다 — 미리 알아두면 그때 훨씬 쉽게 이해됩니다.
+
 ---
 
 ## Day 1 — 도메인 기초: 왜 "잔액"이 아니라 "원장"이 진실인가 (S0, S1)
