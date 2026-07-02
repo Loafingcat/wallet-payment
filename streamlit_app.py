@@ -1,21 +1,99 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date, datetime
+from enum import Enum
 from uuid import uuid4
 
-import pandas as pd
 import streamlit as st
 
 
-APP_STATE_VERSION = "wallet-payment-service-demo-v1"
-GITHUB_URL = "https://github.com/Loafingcat/wallet-payment"
+APP_STATE_VERSION = "simple-demo-v3"
+APP_DISPLAY_VERSION = "간편 체험판 v3"
 
 
-def now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+class LedgerType(Enum):
+    CHARGE = ("충전", 1)
+    PAYMENT = ("결제", -1)
+    REFUND = ("환불", 1)
+    TRANSFER_OUT = ("송금 출금", -1)
+    TRANSFER_IN = ("송금 입금", 1)
+
+    @property
+    def label(self) -> str:
+        return self.value[0]
+
+    @property
+    def sign(self) -> int:
+        return self.value[1]
 
 
-def won(amount: int) -> str:
+class PaymentStatus(Enum):
+    PENDING_PG = "PENDING_PG"
+    APPROVED = "APPROVED"
+    FAILED = "FAILED"
+
+
+class OutboxStatus(Enum):
+    PENDING = "PENDING"
+    PUBLISHED = "PUBLISHED"
+
+
+@dataclass
+class Wallet:
+    id: int
+    user: str
+    balance: int
+
+
+@dataclass
+class LedgerEntry:
+    id: int
+    wallet_id: int
+    type: LedgerType
+    amount: int
+    balance_after: int
+    idempotency_key: str
+    merchant: str | None = None
+    refund_of_entry_id: int | None = None
+    created_at: datetime = field(default_factory=datetime.now)
+
+    @property
+    def signed_amount(self) -> int:
+        return self.amount * self.type.sign
+
+
+@dataclass
+class Payment:
+    id: int
+    wallet_id: int
+    merchant: str
+    amount: int
+    idempotency_key: str
+    status: PaymentStatus
+    ledger_entry_id: int | None = None
+    reason: str | None = None
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class OutboxEvent:
+    id: int
+    event_type: str
+    payload: str
+    status: OutboxStatus = OutboxStatus.PENDING
+    created_at: datetime = field(default_factory=datetime.now)
+    published_at: datetime | None = None
+
+
+def next_id(name: str) -> int:
+    key = f"next_{name}_id"
+    value = st.session_state[key]
+    st.session_state[key] += 1
+    return value
+
+
+def format_won(amount: int) -> str:
     return f"{amount:,}원"
 
 
@@ -23,566 +101,737 @@ def new_key(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:8]}"
 
 
-def next_id(kind: str) -> str:
-    key = f"next_{kind}_id"
-    value = st.session_state[key]
-    st.session_state[key] += 1
-    return f"{kind.upper()}-{value}"
+def init_state(force: bool = False) -> None:
+    if not force and st.session_state.get("app_state_version") == APP_STATE_VERSION and "wallets" in st.session_state:
+        return
 
-
-def clear_state() -> None:
     for key in list(st.session_state.keys()):
         del st.session_state[key]
 
-
-def init_state(force: bool = False) -> None:
-    if not force and st.session_state.get("app_state_version") == APP_STATE_VERSION:
-        return
-
-    clear_state()
     st.session_state.app_state_version = APP_STATE_VERSION
-    st.session_state.next_w_id = 1001
-    st.session_state.next_t_id = 1001
-    st.session_state.next_s_id = 1001
-    st.session_state.wallets = []
-    st.session_state.ledger_entries = []
-    st.session_state.settlements = []
-    st.session_state.last_result = None
+    st.session_state.next_wallet_id = 1
+    st.session_state.next_ledger_id = 1
+    st.session_state.next_payment_id = 1
+    st.session_state.next_outbox_id = 1
+    st.session_state.wallets: dict[int, Wallet] = {}
+    st.session_state.ledger: list[LedgerEntry] = []
+    st.session_state.payments: list[Payment] = []
+    st.session_state.outbox: list[OutboxEvent] = []
+    st.session_state.pg_store: dict[str, str] = {}
+    st.session_state.processed_events: set[int] = set()
+    st.session_state.settlements: dict[tuple[str, date], dict[str, int | str]] = {}
+    st.session_state.activity: list[str] = []
+
+    wallet_a = create_wallet("사용자 A", 100_000)
+    wallet_b = create_wallet("사용자 B", 30_000)
+    add_ledger(wallet_a.id, LedgerType.CHARGE, 100_000, new_key("seed-charge-a"))
+    add_ledger(wallet_b.id, LedgerType.CHARGE, 30_000, new_key("seed-charge-b"))
 
 
-def reset_demo() -> None:
+def reset_state() -> None:
     init_state(force=True)
-    st.success("전체 데이터를 초기화했습니다.")
+    flash("데모 데이터를 초기화했습니다.")
 
 
-def wallet_by_id(wallet_id: str) -> dict:
-    return next(wallet for wallet in st.session_state.wallets if wallet["wallet_id"] == wallet_id)
+def flash(message: str) -> None:
+    st.session_state.activity.insert(0, f"{datetime.now().strftime('%H:%M:%S')}  {message}")
+    st.session_state.activity = st.session_state.activity[:8]
 
 
-def wallet_options(wallet_type: str | None = None) -> dict[str, str]:
-    wallets = st.session_state.wallets
-    if wallet_type:
-        wallets = [wallet for wallet in wallets if wallet["wallet_type"] == wallet_type]
-    return {f'{wallet["owner_name"]} ({wallet["wallet_id"]})': wallet["wallet_id"] for wallet in wallets}
+def create_wallet(user: str, balance: int = 0) -> Wallet:
+    wallet = Wallet(next_id("wallet"), user, balance)
+    st.session_state.wallets[wallet.id] = wallet
+    return wallet
 
 
-def has_demo_data() -> bool:
-    return bool(st.session_state.wallets)
-
-
-def add_wallet(owner_name: str, wallet_type: str, balance: int = 0) -> str:
-    wallet_id = next_id("w")
-    st.session_state.wallets.append(
-        {
-            "wallet_id": wallet_id,
-            "owner_name": owner_name,
-            "wallet_type": wallet_type,
-            "balance": balance,
-            "created_at": now_text(),
-        }
-    )
-    return wallet_id
+def find_ledger_by_key(key: str) -> LedgerEntry | None:
+    return next((entry for entry in st.session_state.ledger if entry.idempotency_key == key), None)
 
 
 def add_ledger(
-    tx_type: str,
-    wallet_id: str,
+    wallet_id: int,
+    ledger_type: LedgerType,
     amount: int,
-    *,
-    counterparty_id: str | None = None,
-    idempotency_key: str | None = None,
-    original_transaction_id: str | None = None,
-    status: str = "SUCCESS",
-    description: str = "",
-) -> dict:
-    entry = {
-        "transaction_id": next_id("t"),
-        "type": tx_type,
-        "wallet_id": wallet_id,
-        "counterparty_id": counterparty_id,
-        "amount": amount,
-        "idempotency_key": idempotency_key or "-",
-        "original_transaction_id": original_transaction_id,
-        "status": status,
-        "created_at": now_text(),
-        "description": description,
-    }
-    st.session_state.ledger_entries.append(entry)
+    idempotency_key: str,
+    merchant: str | None = None,
+    refund_of_entry_id: int | None = None,
+) -> LedgerEntry:
+    wallet = st.session_state.wallets[wallet_id]
+    entry = LedgerEntry(
+        id=next_id("ledger"),
+        wallet_id=wallet_id,
+        type=ledger_type,
+        amount=amount,
+        balance_after=wallet.balance,
+        merchant=merchant,
+        refund_of_entry_id=refund_of_entry_id,
+        idempotency_key=idempotency_key,
+    )
+    st.session_state.ledger.append(entry)
     return entry
 
 
-def create_demo_data() -> None:
-    init_state(force=True)
-
-    user_a = add_wallet("민지", "USER")
-    user_b = add_wallet("준호", "USER")
-    merchant_a = add_wallet("그린카페", "MERCHANT")
-    merchant_b = add_wallet("북스토어", "MERCHANT")
-
-    charge_wallet(user_a, 100_000, new_key("seed-charge"))
-    charge_wallet(user_b, 70_000, new_key("seed-charge"))
-    pay_wallet(user_a, merchant_a, 12_000, new_key("seed-pay"))
-    pay_wallet(user_a, merchant_b, 8_500, new_key("seed-pay"))
-    pay_wallet(user_b, merchant_a, 6_000, new_key("seed-pay"))
-    st.session_state.last_result = ("success", "데모 데이터가 준비되었습니다. 이제 지갑 사용해보기 메뉴에서 직접 충전, 결제, 환불을 해보세요.")
-
-
-def charge_wallet(wallet_id: str, amount: int, key: str) -> dict:
-    wallet = wallet_by_id(wallet_id)
-    before = wallet["balance"]
-    wallet["balance"] += amount
-    entry = add_ledger(
-        "CHARGE",
-        wallet_id,
-        amount,
-        idempotency_key=key,
-        description=f"{wallet['owner_name']} 지갑 충전",
-    )
-    return {"entry": entry, "before": before, "after": wallet["balance"], "duplicate": False}
-
-
-def pay_wallet(user_wallet_id: str, merchant_wallet_id: str, amount: int, key: str) -> dict:
-    existing = next(
-        (
-            entry
-            for entry in st.session_state.ledger_entries
-            if entry["type"] == "PAYMENT" and entry["idempotency_key"] == key
-        ),
-        None,
-    )
+def charge(wallet_id: int, amount: int, key: str) -> LedgerEntry:
+    existing = find_ledger_by_key(key)
     if existing:
-        return {"entry": existing, "duplicate": True}
+        flash(f"멱등키 재사용: 기존 충전 #{existing.id} 결과를 반환했습니다.")
+        return existing
 
-    user_wallet = wallet_by_id(user_wallet_id)
-    merchant_wallet = wallet_by_id(merchant_wallet_id)
-    before = user_wallet["balance"]
-    if before < amount:
-        return {"error": "잔액이 부족합니다.", "before": before, "after": before}
+    wallet = st.session_state.wallets[wallet_id]
+    wallet.balance += amount
+    entry = add_ledger(wallet_id, LedgerType.CHARGE, amount, key)
+    flash(f"{wallet.user} 지갑에 {format_won(amount)} 충전")
+    return entry
 
-    user_wallet["balance"] -= amount
-    merchant_wallet["balance"] += amount
+
+def pay(wallet_id: int, merchant: str, amount: int, key: str) -> LedgerEntry | None:
+    existing = find_ledger_by_key(key)
+    if existing:
+        flash(f"멱등키 재사용: 기존 결제 #{existing.id} 결과를 반환했습니다.")
+        return existing
+
+    wallet = st.session_state.wallets[wallet_id]
+    if wallet.balance < amount:
+        flash(f"잔액 부족: {wallet.user} 결제 {format_won(amount)} 거절")
+        return None
+
+    wallet.balance -= amount
+    entry = add_ledger(wallet_id, LedgerType.PAYMENT, amount, key, merchant=merchant)
+    st.session_state.outbox.append(
+        OutboxEvent(
+            id=next_id("outbox"),
+            event_type="PaymentCompleted",
+            payload=f"ledgerEntryId={entry.id}, walletId={wallet_id}, amount={amount}",
+        )
+    )
+    flash(f"{merchant} 결제 승인: {format_won(amount)}")
+    return entry
+
+
+def refund(payment_entry_id: int, amount: int, key: str) -> LedgerEntry | None:
+    existing = find_ledger_by_key(key)
+    if existing:
+        flash(f"멱등키 재사용: 기존 환불 #{existing.id} 결과를 반환했습니다.")
+        return existing
+
+    payment = next((entry for entry in st.session_state.ledger if entry.id == payment_entry_id), None)
+    if not payment or payment.type is not LedgerType.PAYMENT:
+        flash("환불 대상 결제를 찾지 못했습니다.")
+        return None
+
+    refunded = sum(
+        entry.amount
+        for entry in st.session_state.ledger
+        if entry.type is LedgerType.REFUND and entry.refund_of_entry_id == payment_entry_id
+    )
+    if refunded + amount > payment.amount:
+        flash("환불 누적액이 원결제 금액을 초과해 거절했습니다.")
+        return None
+
+    wallet = st.session_state.wallets[payment.wallet_id]
+    wallet.balance += amount
     entry = add_ledger(
-        "PAYMENT",
-        user_wallet_id,
+        payment.wallet_id,
+        LedgerType.REFUND,
         amount,
-        counterparty_id=merchant_wallet_id,
+        key,
+        merchant=payment.merchant,
+        refund_of_entry_id=payment_entry_id,
+    )
+    flash(f"결제 #{payment_entry_id} 환불: {format_won(amount)}")
+    return entry
+
+
+def transfer(from_wallet_id: int, to_wallet_id: int, amount: int, key: str) -> None:
+    out_key = f"{key}:out"
+    in_key = f"{key}:in"
+    if find_ledger_by_key(out_key):
+        flash("멱등키 재사용: 기존 송금 결과를 반환했습니다.")
+        return
+
+    first_id, second_id = sorted([from_wallet_id, to_wallet_id])
+    first = st.session_state.wallets[first_id]
+    second = st.session_state.wallets[second_id]
+    from_wallet = first if first.id == from_wallet_id else second
+    to_wallet = first if first.id == to_wallet_id else second
+
+    if from_wallet.balance < amount:
+        flash("송금 잔액 부족으로 거절했습니다.")
+        return
+
+    from_wallet.balance -= amount
+    add_ledger(from_wallet.id, LedgerType.TRANSFER_OUT, amount, out_key)
+    to_wallet.balance += amount
+    add_ledger(to_wallet.id, LedgerType.TRANSFER_IN, amount, in_key)
+    flash(f"락 순서 고정 후 송금 성공: {from_wallet.user} -> {to_wallet.user}, {format_won(amount)}")
+
+
+def request_external_payment(wallet_id: int, merchant: str, amount: int, key: str, failure: str) -> Payment:
+    existing = next((payment for payment in st.session_state.payments if payment.idempotency_key == key), None)
+    if existing:
+        flash(f"외부 PG 멱등키 재사용: payment #{existing.id} 반환")
+        return existing
+
+    payment = Payment(
+        id=next_id("payment"),
+        wallet_id=wallet_id,
+        merchant=merchant,
+        amount=amount,
         idempotency_key=key,
-        description=f"{user_wallet['owner_name']} -> {merchant_wallet['owner_name']} 결제",
+        status=PaymentStatus.PENDING_PG,
     )
-    return {"entry": entry, "before": before, "after": user_wallet["balance"], "duplicate": False}
+    st.session_state.payments.append(payment)
+
+    if failure == "5xx":
+        payment.status = PaymentStatus.FAILED
+        payment.reason = "PG 5xx: 승인 기록 없음"
+        flash("PG 5xx 응답: 돈은 움직이지 않고 FAILED 처리")
+        return payment
+
+    if failure == "timeout":
+        st.session_state.pg_store[key] = "APPROVED"
+        flash("PG 타임아웃: 우리 DB는 PENDING_PG, PG에는 나중에 APPROVED 기록")
+        return payment
+
+    if failure == "lost-response":
+        st.session_state.pg_store[key] = "APPROVED"
+        flash("PG 응답 유실: 우리 DB는 PENDING_PG, PG에는 이미 APPROVED")
+        return payment
+
+    st.session_state.pg_store[key] = "APPROVED"
+    confirm_external_payment(payment)
+    flash("PG 정상 승인: APPROVED와 원장 반영 완료")
+    return payment
 
 
-def refundable_payments() -> list[dict]:
-    payments = [entry for entry in st.session_state.ledger_entries if entry["type"] == "PAYMENT"]
-    result = []
-    for payment in payments:
-        refunded = sum(
-            entry["amount"]
-            for entry in st.session_state.ledger_entries
-            if entry["type"] == "REFUND" and entry["original_transaction_id"] == payment["transaction_id"]
-        )
-        remaining = payment["amount"] - refunded
-        if remaining > 0:
-            result.append({**payment, "remaining_refundable": remaining})
-    return result
+def confirm_external_payment(payment: Payment) -> Payment:
+    if payment.status is not PaymentStatus.PENDING_PG:
+        return payment
+
+    entry = pay(payment.wallet_id, payment.merchant, payment.amount, payment.idempotency_key)
+    if entry:
+        payment.status = PaymentStatus.APPROVED
+        payment.ledger_entry_id = entry.id
+    else:
+        payment.status = PaymentStatus.FAILED
+        payment.reason = "잔액 부족"
+    return payment
 
 
-def refund_payment(payment_tx_id: str, amount: int) -> dict:
-    payment = next(entry for entry in st.session_state.ledger_entries if entry["transaction_id"] == payment_tx_id)
-    already_refunded = sum(
-        entry["amount"]
-        for entry in st.session_state.ledger_entries
-        if entry["type"] == "REFUND" and entry["original_transaction_id"] == payment_tx_id
-    )
-    if already_refunded + amount > payment["amount"]:
-        return {"error": "원결제 금액보다 많이 환불할 수 없습니다."}
-
-    user_wallet = wallet_by_id(payment["wallet_id"])
-    merchant_wallet = wallet_by_id(payment["counterparty_id"])
-    before = user_wallet["balance"]
-    user_wallet["balance"] += amount
-    merchant_wallet["balance"] -= amount
-    entry = add_ledger(
-        "REFUND",
-        payment["wallet_id"],
-        amount,
-        counterparty_id=payment["counterparty_id"],
-        idempotency_key=new_key("refund"),
-        original_transaction_id=payment_tx_id,
-        description=f"결제 {payment_tx_id} 환불",
-    )
-    return {"entry": entry, "before": before, "after": user_wallet["balance"]}
+def reconcile_pending_payments() -> None:
+    changed = 0
+    for payment in st.session_state.payments:
+        if payment.status is PaymentStatus.PENDING_PG and st.session_state.pg_store.get(payment.idempotency_key) == "APPROVED":
+            confirm_external_payment(payment)
+            changed += 1
+    flash(f"PG 보정 실행: {changed}건 확정")
 
 
-def transfer_wallet(from_wallet_id: str, to_wallet_id: str, amount: int) -> dict:
-    if from_wallet_id == to_wallet_id:
-        return {"error": "같은 지갑으로는 송금할 수 없습니다."}
-    from_wallet = wallet_by_id(from_wallet_id)
-    to_wallet = wallet_by_id(to_wallet_id)
-    before = from_wallet["balance"]
-    if before < amount:
-        return {"error": "잔액이 부족합니다.", "before": before, "after": before}
-
-    transfer_key = new_key("transfer")
-    from_wallet["balance"] -= amount
-    to_wallet["balance"] += amount
-    out_entry = add_ledger(
-        "TRANSFER_OUT",
-        from_wallet_id,
-        amount,
-        counterparty_id=to_wallet_id,
-        idempotency_key=f"{transfer_key}:out",
-        description=f"{from_wallet['owner_name']} -> {to_wallet['owner_name']} 송금 출금",
-    )
-    add_ledger(
-        "TRANSFER_IN",
-        to_wallet_id,
-        amount,
-        counterparty_id=from_wallet_id,
-        idempotency_key=f"{transfer_key}:in",
-        description=f"{to_wallet['owner_name']} 송금 입금",
-    )
-    return {"entry": out_entry, "before": before, "after": from_wallet["balance"]}
+def relay_outbox() -> None:
+    count = 0
+    for event in st.session_state.outbox:
+        if event.status is OutboxStatus.PENDING:
+            event.status = OutboxStatus.PUBLISHED
+            event.published_at = datetime.now()
+            if event.event_type == "PaymentCompleted":
+                ledger_id = int(event.payload.split("ledgerEntryId=")[1].split(",")[0])
+                st.session_state.processed_events.add(ledger_id)
+            count += 1
+    flash(f"Outbox relay 실행: {count}건 발행")
 
 
-def get_counterparty_name(counterparty_id: str | None) -> str:
-    if not counterparty_id:
-        return "-"
-    return wallet_by_id(counterparty_id)["owner_name"]
+def run_lost_update_demo() -> None:
+    wallet = st.session_state.wallets[1]
+    wallet.balance = 10_000
+    st.session_state.ledger = [entry for entry in st.session_state.ledger if entry.wallet_id != wallet.id]
+    add_ledger(wallet.id, LedgerType.CHARGE, 10_000, new_key("race-seed"))
+
+    both_saw_balance = wallet.balance
+    if both_saw_balance >= 6_000:
+        wallet.balance -= 6_000
+        add_ledger(wallet.id, LedgerType.PAYMENT, 6_000, new_key("race-a"), merchant="A상점")
+    if both_saw_balance >= 6_000:
+        wallet.balance -= 6_000
+        add_ledger(wallet.id, LedgerType.PAYMENT, 6_000, new_key("race-b"), merchant="B상점")
+    flash("락 없는 동시 결제 재현: 둘 다 성공해서 잔액이 음수가 됐습니다.")
 
 
-def ledger_df(entries: list[dict] | None = None) -> pd.DataFrame:
-    entries = entries if entries is not None else st.session_state.ledger_entries
+def run_pessimistic_lock_demo() -> None:
+    wallet = st.session_state.wallets[1]
+    wallet.balance = 10_000
+    st.session_state.ledger = [entry for entry in st.session_state.ledger if entry.wallet_id != wallet.id]
+    add_ledger(wallet.id, LedgerType.CHARGE, 10_000, new_key("lock-seed"))
+
+    pay(wallet.id, "A상점", 6_000, new_key("lock-a"))
+    pay(wallet.id, "B상점", 6_000, new_key("lock-b"))
+    flash("비관적 락 시나리오: 첫 결제만 성공하고 두 번째는 최신 잔액 기준으로 거절됩니다.")
+
+
+def corrupt_balance() -> None:
+    wallet = st.session_state.wallets[1]
+    wallet.balance += 12_345
+    flash("운영 실수 시뮬레이션: 캐시 잔액만 임의로 바꿨습니다.")
+
+
+def ledger_sum(wallet_id: int) -> int:
+    return sum(entry.signed_amount for entry in st.session_state.ledger if entry.wallet_id == wallet_id)
+
+
+def find_discrepancies() -> list[dict[str, str | int]]:
     rows = []
-    for entry in reversed(entries):
-        wallet = wallet_by_id(entry["wallet_id"])
-        rows.append(
-            {
-                "거래 ID": entry["transaction_id"],
-                "거래 유형": entry["type"],
-                "지갑": f'{wallet["owner_name"]} ({entry["wallet_id"]})',
-                "상대 지갑 또는 가맹점": get_counterparty_name(entry["counterparty_id"]),
-                "금액": entry["amount"],
-                "요청 키": entry["idempotency_key"],
-                "상태": entry["status"],
-                "생성 시간": entry["created_at"],
-                "설명": entry["description"],
-            }
+    for wallet in st.session_state.wallets.values():
+        expected = ledger_sum(wallet.id)
+        if wallet.balance != expected:
+            rows.append(
+                {
+                    "walletId": wallet.id,
+                    "사용자": wallet.user,
+                    "캐시 잔액": wallet.balance,
+                    "원장 합계": expected,
+                    "차이": wallet.balance - expected,
+                }
+            )
+    return rows
+
+
+def run_settlement(target_date: date) -> None:
+    merchant_names = sorted({entry.merchant for entry in st.session_state.ledger if entry.merchant})
+    created = 0
+    for merchant in merchant_names:
+        key = (merchant, target_date)
+        if key in st.session_state.settlements:
+            continue
+        payments = sum(
+            entry.amount
+            for entry in st.session_state.ledger
+            if entry.merchant == merchant and entry.type is LedgerType.PAYMENT
         )
-    return pd.DataFrame(rows)
+        refunds = sum(
+            entry.amount
+            for entry in st.session_state.ledger
+            if entry.merchant == merchant and entry.type is LedgerType.REFUND
+        )
+        fee = round(payments * 0.025)
+        st.session_state.settlements[key] = {
+            "가맹점": merchant,
+            "날짜": target_date.isoformat(),
+            "총결제액": payments,
+            "총환불액": refunds,
+            "수수료": fee,
+            "정산액": payments - refunds - fee,
+        }
+        created += 1
+    flash(f"정산 실행: 새 스냅샷 {created}건 생성")
 
 
-def wallet_df() -> pd.DataFrame:
-    return pd.DataFrame(st.session_state.wallets)
+def quick_payment_demo() -> None:
+    entry = pay(1, "데모 상점", 6_000, new_key("quick-pay"))
+    if entry:
+        relay_outbox()
+        flash("빠른 체험: 결제, 원장 기록, Outbox 발행까지 한 번에 실행했습니다.")
 
 
-def settlement_df() -> pd.DataFrame:
-    return pd.DataFrame(st.session_state.settlements)
+def quick_concurrency_demo() -> None:
+    run_lost_update_demo()
+    run_pessimistic_lock_demo()
+    flash("빠른 체험: 락 없는 버그와 비관적 락 결과를 차례대로 비교했습니다.")
 
 
-def sum_by_type(tx_type: str) -> int:
-    return sum(entry["amount"] for entry in st.session_state.ledger_entries if entry["type"] == tx_type)
+def quick_pg_demo() -> None:
+    request_external_payment(1, "PG 데모몰", 8_000, new_key("quick-pg"), "timeout")
+    reconcile_pending_payments()
+    flash("빠른 체험: PG timeout 이후 보정으로 결제를 확정했습니다.")
 
 
-def render_notice() -> None:
-    st.caption("실제 금융 서비스가 아니라 프로젝트 데모입니다. 데이터는 현재 브라우저 세션에만 저장됩니다.")
+def quick_balance_demo() -> None:
+    corrupt_balance()
+    discrepancies = find_discrepancies()
+    flash(f"빠른 체험: 잔액 불일치 {len(discrepancies)}건을 만들고 탐지했습니다.")
 
 
-def render_sidebar() -> str:
-    st.sidebar.title("Wallet Payment")
-    menu = st.sidebar.radio(
-        "메뉴",
-        ["시작하기", "지갑 사용해보기", "거래내역과 정산", "프로젝트 구조"],
+def quick_settlement_demo() -> None:
+    pay(1, "정산 데모 상점", 10_000, new_key("quick-settlement-pay"))
+    run_settlement(date.today())
+    flash("빠른 체험: 결제 생성 후 오늘 정산 스냅샷을 만들었습니다.")
+
+
+def ledger_rows() -> list[dict[str, str | int]]:
+    return [
+        {
+            "ID": entry.id,
+            "시간": entry.created_at.strftime("%H:%M:%S"),
+            "지갑": st.session_state.wallets[entry.wallet_id].user,
+            "유형": entry.type.label,
+            "금액": entry.amount,
+            "잔액": entry.balance_after,
+            "가맹점": entry.merchant or "-",
+            "멱등키": entry.idempotency_key,
+        }
+        for entry in reversed(st.session_state.ledger)
+    ]
+
+
+def payment_rows() -> list[dict[str, str | int]]:
+    return [
+        {
+            "ID": payment.id,
+            "지갑": st.session_state.wallets[payment.wallet_id].user,
+            "가맹점": payment.merchant,
+            "금액": payment.amount,
+            "상태": payment.status.value,
+            "원장ID": payment.ledger_entry_id or "-",
+            "사유": payment.reason or "-",
+        }
+        for payment in reversed(st.session_state.payments)
+    ]
+
+
+def outbox_rows() -> list[dict[str, str | int]]:
+    return [
+        {
+            "ID": event.id,
+            "타입": event.event_type,
+            "상태": event.status.value,
+            "페이로드": event.payload,
+            "발행시각": event.published_at.strftime("%H:%M:%S") if event.published_at else "-",
+        }
+        for event in reversed(st.session_state.outbox)
+    ]
+
+
+def render_wallets() -> None:
+    st.subheader("지갑")
+    cols = st.columns(len(st.session_state.wallets))
+    for col, wallet in zip(cols, st.session_state.wallets.values()):
+        expected = ledger_sum(wallet.id)
+        delta = wallet.balance - expected
+        col.metric(wallet.user, format_won(wallet.balance), delta=f"원장 차이 {delta:,}원")
+        col.caption(f"walletId={wallet.id} · ledger sum {format_won(expected)}")
+
+
+def render_usage_guide() -> None:
+    st.info(
+        "처음이라면 아래의 빠른 체험 버튼부터 눌러보세요. "
+        "복잡한 입력 없이 결제, 동시성, PG 장애 처리, 잔액 검증, 정산 흐름을 바로 확인할 수 있습니다."
     )
-    st.sidebar.divider()
-    if st.sidebar.button("전체 초기화", use_container_width=True):
-        reset_demo()
+    st.subheader("가장 쉬운 사용 순서")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1.container(border=True):
+        st.markdown("**1. 결제 흐름**")
+        st.caption("돈이 빠지고 원장이 남고 이벤트가 발행되는지 확인합니다.")
+    with c2.container(border=True):
+        st.markdown("**2. 동시성 비교**")
+        st.caption("락이 없을 때와 있을 때 결과가 어떻게 달라지는지 봅니다.")
+    with c3.container(border=True):
+        st.markdown("**3. PG 장애 처리**")
+        st.caption("응답을 못 받은 결제가 보정으로 확정되는지 봅니다.")
+    with c4.container(border=True):
+        st.markdown("**4. 잔액 검증**")
+        st.caption("캐시 잔액과 원장 합계가 어긋나면 잡아내는지 봅니다.")
+
+    st.markdown("**추천 흐름**")
+    st.success(
+        "`결제 흐름 한 번에 보기` -> `동시성 비교` -> `PG 장애 처리` -> `잔액 검증` -> `정산 만들기`"
+    )
+
+    with st.expander("상세 사용법 보기"):
+        quick, areas, details = st.tabs(["3분 데모", "화면 구성", "기능별 확인"])
+
+        with quick:
+            st.markdown(
+                """
+                1. 상단 `지갑`에서 두 지갑의 `원장 차이 0원`을 확인합니다.
+                2. `거래 실행` -> `결제`에서 결제를 하나 만들고, 아래 `원장` 탭에 결제 행이 생기는지 봅니다.
+                3. `Outbox` 탭에서 결제 이벤트가 `PENDING`으로 남은 것을 확인한 뒤 `Outbox 발행`을 누릅니다.
+                4. `락 없는 버그`를 눌러 음수 잔액 버그를 보고, 바로 `비관적 락`을 눌러 수정된 결과를 비교합니다.
+                5. `PG 결제`에서 `timeout` 또는 `lost-response`를 고른 뒤 요청하고, `PG 보정`을 눌러 `PENDING_PG`가 `APPROVED`로 바뀌는지 확인합니다.
+                6. `잔액 깨뜨리기`를 누른 뒤 `잔액 검증` 탭에서 캐시 잔액과 원장 합계 불일치를 확인합니다.
+                7. 결제나 환불을 몇 건 만든 뒤 `오늘 정산`을 눌러 가맹점별 정산 스냅샷을 봅니다.
+                """
+            )
+
+        with areas:
+            st.markdown(
+                """
+                - `지갑`: `Wallet.balance` 캐시와 `LedgerEntry` 합계의 차이를 보여줍니다.
+                - `시나리오`: 동시성 버그, 비관적 락, PG 보정, Outbox 발행, 잔액 검증, 정산을 한 번에 재현합니다.
+                - `거래 실행`: 충전, 결제, 환불, 송금, PG 결제를 직접 실행합니다.
+                - `이벤트 로그`: 방금 실행한 동작이 어떤 결과를 만들었는지 보여줍니다.
+                - 하단 탭: 원장, PG 상태, Outbox, 잔액 검증, 정산 결과를 테이블로 확인합니다.
+                """
+            )
+
+        with details:
+            st.markdown(
+                """
+                - 같은 `Idempotency-Key`로 같은 요청을 다시 보내면 새 원장을 만들지 않고 기존 결과를 반환합니다.
+                - `PG 응답`의 `5xx`는 즉시 실패, `timeout`과 `lost-response`는 보정 전까지 `PENDING_PG`로 남습니다.
+                - `Outbox 발행`은 실제 RabbitMQ 대신 `PENDING` 이벤트를 `PUBLISHED`로 바꾸는 방식으로 흐름만 재현합니다.
+                - `오늘 정산`은 이미 생성된 같은 날짜/가맹점 스냅샷을 다시 계산하지 않습니다.
+                - `초기화`를 누르면 데모 상태가 처음 데이터로 돌아갑니다.
+                """
+            )
+
+
+def render_reset_bar() -> None:
+    left, right = st.columns([3, 1])
+    left.caption("데모를 이것저것 눌러보다가 상태가 헷갈리면 오른쪽 버튼으로 처음 상태로 되돌릴 수 있습니다.")
+    if right.button("처음 상태로 초기화", use_container_width=True):
+        reset_state()
         st.rerun()
-    st.sidebar.caption("전체 구현 코드는 GitHub에서 확인할 수 있습니다.")
-    st.sidebar.link_button("GitHub 저장소", GITHUB_URL, use_container_width=True)
-    return menu
 
 
-def require_demo_data() -> bool:
-    if has_demo_data():
-        return True
-    st.warning("먼저 시작하기 메뉴에서 데모 데이터를 만들어주세요.")
-    if st.button("데모 데이터 만들기", type="primary"):
-        create_demo_data()
-        st.rerun()
-    return False
+def render_actions() -> None:
+    st.subheader("직접 거래 실행")
+    st.caption("원하는 값을 바꿔서 직접 눌러보고 싶을 때 사용하는 상세 조작 영역입니다.")
+    wallet_options = {f"{wallet.user} (#{wallet.id})": wallet.id for wallet in st.session_state.wallets.values()}
 
+    tab_charge, tab_pay, tab_refund, tab_transfer, tab_pg = st.tabs(["충전", "결제", "환불", "송금", "PG 결제"])
 
-def render_start() -> None:
-    st.title("Wallet Payment")
-    st.subheader("선불 지갑 기반 충전·결제·환불·정산 데모")
-    st.write("지갑에 금액을 충전하고, 가맹점에 결제하고, 필요하면 환불과 정산까지 확인할 수 있는 선불 지갑 서비스입니다.")
-    render_notice()
-
-    col_a, col_b = st.columns([1, 1])
-    if col_a.button("데모 데이터 만들기", type="primary", use_container_width=True):
-        create_demo_data()
-        st.rerun()
-    if col_b.button("처음부터 다시 시작", use_container_width=True):
-        reset_demo()
-        st.rerun()
-
-    if st.session_state.last_result:
-        level, message = st.session_state.last_result
-        getattr(st, level)(message)
-
-    if not has_demo_data():
-        st.info("데모 데이터 만들기를 누르면 사용자 지갑 2개, 가맹점 지갑 2개, 샘플 거래가 생성됩니다.")
-        return
-
-    user_count = len([wallet for wallet in st.session_state.wallets if wallet["wallet_type"] == "USER"])
-    merchant_count = len([wallet for wallet in st.session_state.wallets if wallet["wallet_type"] == "MERCHANT"])
-    total_payment = sum_by_type("PAYMENT")
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("사용자 지갑 수", user_count)
-    m2.metric("가맹점 수", merchant_count)
-    m3.metric("총 거래 수", len(st.session_state.ledger_entries))
-    m4.metric("전체 결제 금액", won(total_payment))
-
-    st.markdown("### 서비스 흐름")
-    steps = st.columns(5)
-    for col, title, body in zip(
-        steps,
-        ["1. 지갑 생성", "2. 충전", "3. 결제", "4. 환불", "5. 정산"],
-        ["사용자와 가맹점 지갑을 만듭니다.", "사용자 지갑에 금액을 넣습니다.", "가맹점에 결제합니다.", "필요하면 반대 거래를 남깁니다.", "가맹점 지급 금액을 계산합니다."],
-    ):
-        with col.container(border=True):
-            st.markdown(f"**{title}**")
-            st.caption(body)
-
-    st.info("모든 금액 변화는 원장 거래로 기록됩니다. 그래서 잔액이 어떻게 바뀌었는지 추적할 수 있습니다.")
-
-
-def render_wallet_use() -> None:
-    st.title("지갑 사용해보기")
-    render_notice()
-    if not require_demo_data():
-        return
-
-    users = wallet_options("USER")
-    merchants = wallet_options("MERCHANT")
-    tabs = st.tabs(["충전", "결제", "환불", "송금"])
-
-    with tabs[0]:
-        st.markdown("충전은 지갑 잔액을 늘리고, `CHARGE` 거래를 기록합니다.")
+    with tab_charge:
         with st.form("charge-form"):
-            wallet_label = st.selectbox("충전할 사용자 지갑", list(users.keys()))
-            amount = st.number_input("충전 금액", min_value=1_000, value=30_000, step=1_000)
-            submitted = st.form_submit_button("충전하기", type="primary")
+            wallet_id = st.selectbox("지갑", wallet_options, key="charge-wallet")
+            amount = st.number_input("충전액", min_value=1_000, value=20_000, step=1_000)
+            key = st.text_input("Idempotency-Key", value=new_key("charge"))
+            submitted = st.form_submit_button("충전")
         if submitted:
-            result = charge_wallet(users[wallet_label], int(amount), new_key("charge"))
-            st.success(f"충전 완료: {won(result['before'])} -> {won(result['after'])}")
+            charge(wallet_options[wallet_id], int(amount), key)
+            st.rerun()
 
-    with tabs[1]:
-        st.markdown("같은 결제 요청이 두 번 들어와도 거래가 중복으로 생성되지 않도록 요청 키를 확인합니다.")
-        default_key = st.session_state.get("payment_key", new_key("pay"))
-        with st.form("payment-form"):
-            user_label = st.selectbox("결제할 사용자 지갑", list(users.keys()))
-            merchant_label = st.selectbox("결제할 가맹점", list(merchants.keys()))
-            amount = st.number_input("결제 금액", min_value=1_000, value=10_000, step=1_000)
-            key = st.text_input("요청 키", value=default_key)
-            submitted = st.form_submit_button("결제하기", type="primary")
-        st.session_state.payment_key = key
+    with tab_pay:
+        with st.form("pay-form"):
+            wallet_id = st.selectbox("지갑", wallet_options, key="pay-wallet")
+            merchant = st.selectbox("가맹점", ["카페 정산", "문구점", "온라인 스토어"])
+            amount = st.number_input("결제액", min_value=1_000, value=6_000, step=1_000)
+            key = st.text_input("Idempotency-Key", value=new_key("pay"))
+            submitted = st.form_submit_button("결제")
         if submitted:
-            result = pay_wallet(users[user_label], merchants[merchant_label], int(amount), key)
-            if result.get("error"):
-                st.error(result["error"])
-            elif result["duplicate"]:
-                st.warning("이미 처리된 요청입니다. 기존 결과를 반환합니다.")
-                st.dataframe(ledger_df([result["entry"]]), use_container_width=True, hide_index=True)
-            else:
-                st.success(f"결제 완료: {won(result['before'])} -> {won(result['after'])}")
-                st.info("네트워크 오류로 사용자가 버튼을 다시 눌러도 같은 요청 키라면 금액이 두 번 빠져나가지 않습니다.")
+            pay(wallet_options[wallet_id], merchant, int(amount), key)
+            st.rerun()
 
-    with tabs[2]:
-        st.markdown("환불은 기존 결제를 지우지 않고, 반대 방향의 `REFUND` 거래를 새로 남깁니다.")
-        payments = refundable_payments()
-        if not payments:
-            st.info("환불 가능한 결제 거래가 없습니다.")
-        else:
+    with tab_refund:
+        payments = [entry for entry in st.session_state.ledger if entry.type is LedgerType.PAYMENT]
+        if payments:
             labels = {
-                f'{entry["transaction_id"]} · {get_counterparty_name(entry["counterparty_id"])} · 남은 환불 가능 {won(entry["remaining_refundable"])}': entry["transaction_id"]
-                for entry in payments
+                f"#{entry.id} {entry.merchant} {format_won(entry.amount)}": entry.id
+                for entry in reversed(payments)
             }
             with st.form("refund-form"):
-                payment_label = st.selectbox("환불할 결제", list(labels.keys()))
-                amount = st.number_input("환불 금액", min_value=1_000, value=5_000, step=1_000)
-                submitted = st.form_submit_button("환불하기", type="primary")
+                payment_label = st.selectbox("원결제", labels)
+                amount = st.number_input("환불액", min_value=1_000, value=3_000, step=1_000)
+                key = st.text_input("Idempotency-Key", value=new_key("refund"))
+                submitted = st.form_submit_button("환불")
             if submitted:
-                result = refund_payment(labels[payment_label], int(amount))
-                if result.get("error"):
-                    st.error(result["error"])
-                else:
-                    st.success(f"환불 완료: {won(result['before'])} -> {won(result['after'])}")
-                    st.info("원래 PAYMENT 거래는 그대로 두고 REFUND 거래를 추가해 이력이 사라지지 않게 했습니다.")
-
-    with tabs[3]:
-        st.markdown("송금은 두 지갑의 잔액이 함께 바뀌기 때문에 실제 백엔드에서는 동시에 여러 요청이 들어오는 상황을 조심해야 합니다.")
-        with st.form("transfer-form"):
-            from_label = st.selectbox("보내는 사용자 지갑", list(users.keys()))
-            to_label = st.selectbox("받는 사용자 지갑", list(users.keys()), index=1)
-            amount = st.number_input("송금 금액", min_value=1_000, value=5_000, step=1_000)
-            submitted = st.form_submit_button("송금하기", type="primary")
-        if submitted:
-            result = transfer_wallet(users[from_label], users[to_label], int(amount))
-            if result.get("error"):
-                st.error(result["error"])
-            else:
-                st.success(f"송금 완료: {won(result['before'])} -> {won(result['after'])}")
-                st.info("보내는 지갑에는 TRANSFER_OUT, 받는 지갑에는 TRANSFER_IN 거래가 기록됩니다.")
-
-
-def render_history_and_settlement() -> None:
-    st.title("거래내역과 정산")
-    render_notice()
-    if not require_demo_data():
-        return
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("총 충전 금액", won(sum_by_type("CHARGE")))
-    m2.metric("총 결제 금액", won(sum_by_type("PAYMENT")))
-    m3.metric("총 환불 금액", won(sum_by_type("REFUND")))
-    m4.metric("총 송금 금액", won(sum_by_type("TRANSFER_OUT")))
-
-    st.markdown("### 거래내역")
-    type_values = sorted({entry["type"] for entry in st.session_state.ledger_entries})
-    wallet_labels = wallet_options()
-    c1, c2 = st.columns(2)
-    selected_type = c1.selectbox("거래 유형 필터", ["전체"] + type_values)
-    selected_wallet_label = c2.selectbox("지갑 필터", ["전체"] + list(wallet_labels.keys()))
-
-    entries = st.session_state.ledger_entries
-    if selected_type != "전체":
-        entries = [entry for entry in entries if entry["type"] == selected_type]
-    if selected_wallet_label != "전체":
-        selected_wallet_id = wallet_labels[selected_wallet_label]
-        entries = [
-            entry
-            for entry in entries
-            if entry["wallet_id"] == selected_wallet_id or entry["counterparty_id"] == selected_wallet_id
-        ]
-    st.dataframe(ledger_df(entries), use_container_width=True, hide_index=True)
-
-    st.markdown("### 시각화")
-    chart1, chart2 = st.columns(2)
-    by_type = (
-        pd.DataFrame(st.session_state.ledger_entries)
-        .groupby("type", as_index=False)["amount"]
-        .sum()
-        .rename(columns={"type": "거래 유형", "amount": "총액"})
-    )
-    chart1.bar_chart(by_type, x="거래 유형", y="총액")
-
-    balances = wallet_df().rename(columns={"owner_name": "지갑", "balance": "잔액"})
-    chart2.bar_chart(balances, x="지갑", y="잔액")
-
-    st.markdown("### 정산")
-    st.caption("정산 수수료율은 데모 수수료율입니다.")
-    merchants = wallet_options("MERCHANT")
-    with st.form("settlement-form"):
-        merchant_label = st.selectbox("정산할 가맹점", list(merchants.keys()))
-        fee_rate = st.number_input("데모 수수료율 (%)", min_value=0.0, max_value=30.0, value=2.5, step=0.1)
-        submitted = st.form_submit_button("정산 계산하기", type="primary")
-
-    if submitted:
-        merchant_id = merchants[merchant_label]
-        today = date.today().isoformat()
-        existing = next(
-            (
-                settlement
-                for settlement in st.session_state.settlements
-                if settlement["merchant_wallet_id"] == merchant_id and settlement["settlement_date"] == today
-            ),
-            None,
-        )
-        if existing:
-            st.warning("이미 같은 날짜, 같은 가맹점에 대해 정산이 실행되었습니다. 기존 결과를 보여줍니다.")
-            settlement = existing
+                refund(labels[payment_label], int(amount), key)
+                st.rerun()
         else:
-            payments = sum(
-                entry["amount"]
-                for entry in st.session_state.ledger_entries
-                if entry["type"] == "PAYMENT" and entry["counterparty_id"] == merchant_id
-            )
-            refunds = sum(
-                entry["amount"]
-                for entry in st.session_state.ledger_entries
-                if entry["type"] == "REFUND" and entry["counterparty_id"] == merchant_id
-            )
-            fee = round(payments * (fee_rate / 100))
-            settlement = {
-                "settlement_id": next_id("s"),
-                "merchant_wallet_id": merchant_id,
-                "settlement_date": today,
-                "total_payment_amount": payments,
-                "total_refund_amount": refunds,
-                "fee_amount": fee,
-                "settlement_amount": payments - refunds - fee,
-                "created_at": now_text(),
-            }
-            st.session_state.settlements.append(settlement)
-            add_ledger(
-                "SETTLEMENT",
-                merchant_id,
-                settlement["settlement_amount"],
-                idempotency_key=f"settlement-{merchant_id}-{today}",
-                description=f"{wallet_by_id(merchant_id)['owner_name']} 정산 계산",
-            )
-            st.success("정산 계산이 완료되었습니다.")
+            st.info("환불 가능한 결제가 아직 없습니다.")
 
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("총 결제 금액", won(settlement["total_payment_amount"]))
-        r2.metric("총 환불 금액", won(settlement["total_refund_amount"]))
-        r3.metric("수수료", won(settlement["fee_amount"]))
-        r4.metric("최종 정산 금액", won(settlement["settlement_amount"]))
-        st.info("정산은 가맹점의 결제와 환불 내역을 모아 최종 지급 금액을 계산하는 과정입니다. 같은 정산이 중복 실행되지 않도록 막아야 합니다.")
+    with tab_transfer:
+        with st.form("transfer-form"):
+            from_label = st.selectbox("출금 지갑", wallet_options, key="transfer-from")
+            to_label = st.selectbox("입금 지갑", wallet_options, index=1, key="transfer-to")
+            amount = st.number_input("송금액", min_value=1_000, value=5_000, step=1_000)
+            key = st.text_input("Idempotency-Key", value=new_key("transfer"))
+            submitted = st.form_submit_button("송금")
+        if submitted:
+            if wallet_options[from_label] == wallet_options[to_label]:
+                flash("같은 지갑으로는 송금할 수 없습니다.")
+            else:
+                transfer(wallet_options[from_label], wallet_options[to_label], int(amount), key)
+            st.rerun()
 
-    if st.session_state.settlements:
-        st.markdown("#### 정산 기록")
-        st.dataframe(settlement_df(), use_container_width=True, hide_index=True)
+    with tab_pg:
+        with st.form("pg-form"):
+            wallet_id = st.selectbox("지갑", wallet_options, key="pg-wallet")
+            merchant = st.selectbox("가맹점", ["PG 제휴몰", "예약 플랫폼", "구독 서비스"])
+            amount = st.number_input("승인금액", min_value=1_000, value=8_000, step=1_000)
+            failure = st.selectbox("PG 응답", ["정상", "timeout", "lost-response", "5xx"])
+            key = st.text_input("Idempotency-Key", value=new_key("pg"))
+            submitted = st.form_submit_button("PG 승인 요청")
+        if submitted:
+            request_external_payment(wallet_options[wallet_id], merchant, int(amount), key, failure)
+            st.rerun()
 
 
-def render_project_structure() -> None:
-    st.title("프로젝트 구조")
-    render_notice()
-    st.markdown("### 이 프로젝트에서 신경 쓴 부분")
+def render_scenarios() -> None:
+    st.subheader("빠른 체험")
+    st.caption("복잡한 입력 없이 버튼 하나로 대표 시나리오를 실행합니다. 아래 표에서 결과를 바로 확인하세요.")
 
-    cards = [
-        ("정합성", "돈이 오가는 서비스에서는 잔액이 한 번이라도 어긋나면 안 됩니다. 모든 금액 변화를 원장 거래로 남겨 잔액을 추적할 수 있게 만들었습니다."),
-        ("중복 요청 방지", "사용자가 같은 결제 버튼을 다시 눌러도 금액이 두 번 빠져나가지 않도록 요청 키를 기준으로 이미 처리된 요청인지 확인합니다."),
-        ("동시성 처리", "여러 결제 요청이 동시에 들어와도 잔액이 음수가 되지 않도록 백엔드에서는 락을 사용해 순서대로 처리합니다."),
-        ("테스트와 검증", "동시 결제, 중복 결제, 환불, 정산 같은 주요 상황을 테스트로 확인해 문제가 생기지 않도록 검증했습니다."),
-    ]
-    cols = st.columns(2)
-    for index, (title, body) in enumerate(cards):
-        with cols[index % 2].container(border=True):
-            st.markdown(f"**{title}**")
-            st.write(body)
+    col1, col2, col3 = st.columns(3)
+    if col1.button("결제 흐름 한 번에 보기", type="primary"):
+        quick_payment_demo()
+        st.rerun()
+    col1.caption("결제 -> 원장 기록 -> Outbox 발행까지 자동 실행")
 
-    st.markdown("### 간단한 흐름")
-    st.code("사용자 요청 -> Spring Boot API -> 서비스 로직 -> 원장 기록 -> 잔액 변경 -> 정산/조회", language=None)
-    st.link_button("전체 구현 코드는 GitHub에서 확인할 수 있습니다.", GITHUB_URL)
+    if col2.button("동시성 비교"):
+        quick_concurrency_demo()
+        st.rerun()
+    col2.caption("락 없는 버그와 비관적 락 결과를 순서대로 재현")
+
+    if col3.button("PG 장애 처리"):
+        quick_pg_demo()
+        st.rerun()
+    col3.caption("timeout 결제를 만들고 보정으로 승인 확정")
+
+    col4, col5, col6 = st.columns(3)
+    if col4.button("잔액 검증"):
+        quick_balance_demo()
+        st.rerun()
+    col4.caption("잔액을 일부러 어긋나게 만들고 탐지")
+
+    if col5.button("정산 만들기"):
+        quick_settlement_demo()
+        st.rerun()
+    col5.caption("결제 데이터를 만들고 가맹점별 정산 스냅샷 생성")
+
+    if col6.button("처음으로 되돌리기"):
+        reset_state()
+        st.rerun()
+    col6.caption("모든 데모 데이터를 초기 상태로 복원")
+
+    with st.expander("개별 시나리오를 따로 실행하기"):
+        c1, c2, c3, c4 = st.columns(4)
+        if c1.button("락 없는 버그만"):
+            run_lost_update_demo()
+            st.rerun()
+        if c2.button("비관적 락만"):
+            run_pessimistic_lock_demo()
+            st.rerun()
+        if c3.button("PG 보정만"):
+            reconcile_pending_payments()
+            st.rerun()
+        if c4.button("Outbox 발행만"):
+            relay_outbox()
+            st.rerun()
+
+
+def render_tables() -> None:
+    tab_ledger, tab_pg, tab_outbox, tab_reconcile, tab_settlement = st.tabs(
+        ["원장", "PG 상태", "Outbox", "잔액 검증", "정산"]
+    )
+
+    with tab_ledger:
+        st.dataframe(ledger_rows(), use_container_width=True, hide_index=True)
+
+    with tab_pg:
+        rows = payment_rows()
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    with tab_outbox:
+        st.dataframe(outbox_rows(), use_container_width=True, hide_index=True)
+        st.caption(f"소비자 멱등 처리 완료 이벤트: {len(st.session_state.processed_events)}건")
+
+    with tab_reconcile:
+        discrepancies = find_discrepancies()
+        if discrepancies:
+            st.error("Wallet.balance 캐시와 LedgerEntry 합계가 다릅니다.")
+            st.dataframe(discrepancies, use_container_width=True, hide_index=True)
+        else:
+            st.success("모든 지갑의 캐시 잔액과 원장 합계가 일치합니다.")
+
+    with tab_settlement:
+        rows = list(st.session_state.settlements.values())
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
+def render_activity() -> None:
+    st.subheader("이벤트 로그")
+    if not st.session_state.activity:
+        st.caption("아직 실행된 이벤트가 없습니다.")
+    for item in st.session_state.activity:
+        st.code(item, language=None)
 
 
 def main() -> None:
-    st.set_page_config(page_title="Wallet Payment", page_icon="💳", layout="wide")
-    init_state()
-
-    menu = render_sidebar()
-    if menu == "시작하기":
-        render_start()
-    elif menu == "지갑 사용해보기":
-        render_wallet_use()
-    elif menu == "거래내역과 정산":
-        render_history_and_settlement()
+    st.set_page_config(
+        page_title="Wallet Payment Demo",
+        page_icon="💳",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+    if st.query_params.get("reset") == "1":
+        reset_state()
+        st.query_params.clear()
     else:
-        render_project_structure()
+        init_state()
+
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 1.4rem; }
+        .guide-hero {
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            padding: 18px 20px;
+            background: #eef6ff;
+            margin: 10px 0 14px 0;
+        }
+        .guide-hero h2 {
+            margin: 2px 0 8px 0;
+            font-size: 1.35rem;
+            color: #0f172a;
+        }
+        .guide-hero p {
+            margin: 0;
+            color: #334155;
+            line-height: 1.55;
+        }
+        .guide-kicker {
+            font-size: 0.78rem;
+            font-weight: 700;
+            color: #1d4ed8;
+            margin-bottom: 2px;
+        }
+        .guide-card {
+            min-height: 92px;
+            border: 1px solid #d9e2ec;
+            border-radius: 8px;
+            padding: 12px 13px;
+            background: #ffffff;
+            margin-bottom: 12px;
+        }
+        .guide-card b {
+            display: block;
+            margin-bottom: 7px;
+            color: #0f172a;
+            font-size: 0.98rem;
+        }
+        .guide-card span {
+            display: block;
+            color: #475569;
+            font-size: 0.9rem;
+            line-height: 1.45;
+        }
+        div[data-testid="stMetric"] {
+            border: 1px solid #d9e2ec;
+            border-radius: 8px;
+            padding: 12px 14px;
+            background: #ffffff;
+        }
+        div[data-testid="stMetricDelta"] svg { display: none; }
+        .stButton button { width: 100%; border-radius: 6px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title("Wallet Payment Demo")
+    st.caption(f"{APP_DISPLAY_VERSION} · 선불 지갑 결제·정산 시스템의 핵심 정합성 흐름을 체험하는 데모입니다.")
+
+    render_usage_guide()
+    render_reset_bar()
+    render_wallets()
+    render_scenarios()
+
+    left, right = st.columns([2, 1], gap="large")
+    with left:
+        render_actions()
+    with right:
+        render_activity()
+
+    render_tables()
 
 
 if __name__ == "__main__":
