@@ -19,6 +19,123 @@
 
 Java 17, Spring Boot 3.5, Spring Data JPA + Hibernate, QueryDSL, MySQL 8, RabbitMQ, Gradle(Groovy DSL), JUnit5 + AssertJ + Testcontainers, GitHub Actions.
 
+## Streamlit Cloud 데모
+
+이 저장소에는 이력서 링크로 바로 열어볼 수 있는 브라우저용 데모도 포함되어 있습니다. 실제 Spring Boot/MySQL/RabbitMQ 운영 서버를 Streamlit Cloud에 그대로 올린 것이 아니라, 방문자가 **"이 프로젝트가 어떤 정합성 문제를 다루는지"** 빠르게 볼 수 있도록 핵심 흐름을 인메모리로 재현한 companion app입니다.
+
+- 엔트리 파일: `streamlit_app.py`
+- 의존성: `requirements.txt`
+- 실행: `streamlit run streamlit_app.py`
+
+### Streamlit Cloud에 배포하기
+
+1. GitHub에 이 저장소를 push합니다.
+2. Streamlit Cloud에서 **New app**을 누릅니다.
+3. Repository를 이 저장소로 선택합니다.
+4. Branch는 배포할 브랜치(`master` 또는 `main`)를 선택합니다.
+5. Main file path에 `streamlit_app.py`를 입력합니다.
+6. Deploy를 누릅니다.
+
+Streamlit Cloud는 루트의 `requirements.txt`를 읽어서 `streamlit`을 설치합니다. 별도 DB, RabbitMQ, Docker, secrets 설정은 필요 없습니다.
+
+### 로컬에서 실행하기
+
+Python과 Streamlit이 설치되어 있다면:
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+`uv`를 쓴다면:
+
+```bash
+uv run --with streamlit==1.46.1 streamlit run streamlit_app.py
+```
+
+브라우저가 열리면 `http://localhost:8501` 또는 터미널에 표시된 Local URL로 접속합니다. 이미 8501 포트가 사용 중이면 Streamlit이 다른 포트를 안내하거나, 직접 `--server.port 8502`처럼 지정하면 됩니다.
+
+### 화면 구성
+
+앱은 위에서 아래로 다음 순서로 구성되어 있습니다.
+
+| 영역 | 용도 |
+|---|---|
+| 지갑 | 각 사용자 지갑의 캐시 잔액과 원장 합계 차이를 보여줍니다. 정상 상태라면 차이가 0원입니다. |
+| 시나리오 버튼 | 동시성 버그, 비관적 락, PG 보정, Outbox 발행, 잔액 불일치, 정산 같은 핵심 상황을 한 번에 재현합니다. |
+| 거래 실행 | 충전, 결제, 환불, 송금, PG 결제를 직접 실행합니다. 각 요청에는 `Idempotency-Key`가 붙습니다. |
+| 이벤트 로그 | 방금 실행한 동작이 시스템에서 어떻게 처리됐는지 짧게 보여줍니다. |
+| 원장/PG/Outbox/잔액 검증/정산 탭 | 내부 상태를 테이블로 보여줍니다. "돈이 왜 이 값인지"를 확인할 때 보는 영역입니다. |
+
+### 3분 데모 순서
+
+처음 보는 사람에게 보여줄 때는 아래 순서가 가장 이해하기 쉽습니다.
+
+1. **초기 상태 확인**
+   - 상단의 `지갑` 영역을 봅니다.
+   - `사용자 A`, `사용자 B`의 잔액과 `원장 차이 0원`을 확인합니다.
+   - 아래 `원장` 탭을 열면 초기 충전 기록이 들어 있습니다.
+
+2. **일반 결제와 원장 확인**
+   - `거래 실행` → `결제` 탭에서 지갑, 가맹점, 금액을 선택하고 `결제`를 누릅니다.
+   - 상단 지갑 잔액이 줄어듭니다.
+   - `원장` 탭에 `결제` 행이 새로 생깁니다.
+   - `Outbox` 탭에는 결제 완료 이벤트가 `PENDING` 상태로 남습니다.
+
+3. **Transactional Outbox 확인**
+   - `시나리오` 영역에서 `Outbox 발행`을 누릅니다.
+   - `Outbox` 탭의 상태가 `PUBLISHED`로 바뀝니다.
+   - 하단 caption의 소비자 멱등 처리 완료 이벤트 수도 증가합니다.
+   - 이 흐름은 실제 백엔드의 `OutboxEvent` + `OutboxRelay` + `ProcessedPaymentEvent` 구조를 단순화한 것입니다.
+
+4. **동시성 버그와 수정 비교**
+   - `락 없는 버그`를 누릅니다.
+   - 같은 지갑에서 6,000원 결제 두 건이 동시에 성공한 것처럼 처리되어 잔액이 음수가 됩니다.
+   - `비관적 락`을 누릅니다.
+   - 같은 조건에서 첫 결제만 성공하고 두 번째 결제는 최신 잔액 기준으로 거절됩니다.
+   - 실제 백엔드에서는 `WalletRepository.findByIdForUpdate()`의 `PESSIMISTIC_WRITE` 락으로 이 문제를 막습니다.
+
+5. **PG 장애와 보정 확인**
+   - `거래 실행` → `PG 결제` 탭으로 갑니다.
+   - `PG 응답`을 `timeout` 또는 `lost-response`로 선택하고 `PG 승인 요청`을 누릅니다.
+   - `PG 상태` 탭에서 결제가 `PENDING_PG`로 남은 것을 확인합니다.
+   - `시나리오` 영역에서 `PG 보정`을 누릅니다.
+   - PG 쪽 승인 기록을 조회한 것으로 보고 `APPROVED`로 확정되며, 그때 원장에 결제가 반영됩니다.
+   - 이 흐름은 실제 백엔드의 `ExternalPaymentService` + `PaymentReconciliationService` 구조를 보여줍니다.
+
+6. **잔액 정합성 점검**
+   - `잔액 깨뜨리기`를 누릅니다.
+   - 상단 지갑의 `원장 차이`가 0원이 아니게 됩니다.
+   - `잔액 검증` 탭을 열면 캐시 잔액(`Wallet.balance`)과 원장 합계(`LedgerEntry` 합계)의 불일치가 표시됩니다.
+   - 실제 백엔드는 이런 상황을 자동 수정하지 않고 `BalanceDiscrepancy`로 기록해 사람이 조사하게 합니다.
+
+7. **정산 스냅샷 확인**
+   - 결제나 환불을 몇 건 만든 뒤 `오늘 정산`을 누릅니다.
+   - `정산` 탭에 가맹점별 총결제액, 총환불액, 수수료, 정산액이 표시됩니다.
+   - 같은 날짜에 다시 `오늘 정산`을 눌러도 이미 만든 스냅샷은 다시 계산하지 않습니다.
+
+### 직접 눌러볼 기능
+
+| 기능 | 어디서 실행 | 확인할 것 |
+|---|---|---|
+| 충전 | `거래 실행` → `충전` | 잔액 증가, `원장` 탭에 `충전` 행 추가 |
+| 결제 | `거래 실행` → `결제` | 잔액 감소, 원장 행 추가, Outbox 이벤트 생성 |
+| 환불 | `거래 실행` → `환불` | 원결제 금액을 초과하지 않는 범위에서 잔액 복구 |
+| 송금 | `거래 실행` → `송금` | 출금/입금 지갑에 `TRANSFER_OUT`, `TRANSFER_IN` 쌍으로 기록 |
+| PG 결제 | `거래 실행` → `PG 결제` | 정상/timeout/lost-response/5xx 케이스별 상태 변화 |
+| 멱등성 | 같은 `Idempotency-Key`로 같은 요청 재실행 | 새 원장이 생기지 않고 기존 결과 반환 |
+
+### 데모 앱과 실제 백엔드의 차이
+
+이 데모는 설명용이라 다음을 단순화했습니다.
+
+- 데이터는 Streamlit 세션 메모리에만 저장됩니다. 새로고침이나 재배포 후에는 초기화될 수 있습니다.
+- 실제 DB 트랜잭션, MySQL row lock, RabbitMQ 발행은 사용하지 않습니다.
+- 동시성은 실제 스레드 경합이 아니라 버튼으로 재현한 시나리오입니다.
+- 정산 날짜는 데모 편의를 위해 오늘 날짜를 사용합니다.
+
+정합성의 실제 구현과 검증은 Spring Boot 코드와 테스트가 담당합니다. 데모 앱은 이력서 링크에서 프로젝트의 핵심 아이디어를 빠르게 보여주기 위한 프론트 도구입니다.
+
 ## 도메인 모델
 
 ```

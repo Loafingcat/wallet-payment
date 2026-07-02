@@ -11,6 +11,9 @@ build/
 out/
 bin/
 .vscode/
+.streamlit/secrets.toml
+streamlit*.log
+__pycache__/
 
 HELP.md
 .DS_Store
